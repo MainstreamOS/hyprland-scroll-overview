@@ -1344,6 +1344,15 @@ CScrollOverview::~CScrollOverview() {
 }
 
 CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_) : startedOn(startedOn_), swipe(swipe_) {
+    // Notify external listeners (e.g. Quickshell) that the overview is
+    // opening so they can adjust shell-wide state — currently used by
+    // dots-hyprland's GlobalStates.qml to temporarily clear the fake
+    // screen rounding for clean overview corners and restore it on
+    // close. Emitted via Hyprland's IPC event bus, observable in QML
+    // through Hyprland.onRawEvent.
+    if (g_pEventManager)
+        g_pEventManager->postEvent(SHyprIPCEvent{.event = "scrolloverview", .data = "open"});
+
     const auto          PMONITOR = Desktop::focusState()->monitor();
     pMonitor                     = PMONITOR;
 
@@ -3945,6 +3954,14 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
 
 void CScrollOverview::close() {
     closing = true;
+
+    // Pair with the "scrolloverview>>open" event emitted in the
+    // constructor — fired at the start of the close animation so
+    // shell-wide listeners (e.g. dots-hyprland's fake screen rounding
+    // restore) react in time to feel synchronous with the visible
+    // close, not at the very end after the FB cleanup.
+    if (g_pEventManager)
+        g_pEventManager->postEvent(SHyprIPCEvent{.event = "scrolloverview", .data = "close"});
 
     const auto SELECTEDWORKSPACE =
         viewportCurrentWorkspace < images.size() && images[viewportCurrentWorkspace] ? images[viewportCurrentWorkspace]->pWorkspace : PHLWORKSPACE{};
