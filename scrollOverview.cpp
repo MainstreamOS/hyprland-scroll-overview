@@ -3236,6 +3236,17 @@ void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceId
         workspace->m_forceRendering = WASFORCERENDERING;
     });
 
+    // Render TOP and OVERLAY layer surfaces (top bar, dock, etc.) into
+    // each workspace card so the previews reflect the live shell as it
+    // actually appears on screen. Run via a scope guard so this also
+    // covers the early `return` path used for fullscreen workspaces —
+    // without this, a workspace with a fullscreen window (Super+D and
+    // similar) would skip the bar render entirely.
+    auto renderShellLayersOnExit = Hyprutils::Utils::CScopeGuard([monitor, WORKSPACEBOX, renderScale, now] {
+        renderOverviewLayerLevel(monitor, ZWLR_LAYER_SHELL_V1_LAYER_TOP, WORKSPACEBOX, renderScale, now);
+        renderOverviewLayerLevel(monitor, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, WORKSPACEBOX, renderScale, now);
+    });
+
     const auto renderOverviewWindow = [&](const PHLWINDOW& window) {
         if (!shouldShowOverviewWindow(window))
             return;
@@ -3277,6 +3288,10 @@ void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceId
     renderWindowsByState(false, true);
     renderWindowsByState(true, false);
     renderWindowsByState(true, true);
+
+    // Shell-layer rendering happens via the scope guard set up above so
+    // it covers both this normal-exit path and the fullscreen-workspace
+    // early return.
 }
 
 void CScrollOverview::renderDraggedWindow(PHLMONITOR monitor, size_t activeIdx, float workspacePitch, float renderScale, const Time::steady_tp& now) {
