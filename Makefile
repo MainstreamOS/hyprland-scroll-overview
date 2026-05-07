@@ -7,6 +7,6 @@ ifeq ($(CXX),g++)
 endif
 
 all:
-	$(CXX) -shared -fPIC $(EXTRA_FLAGS) main.cpp OverviewGesture.cpp OverviewPassElement.cpp scrollOverview.cpp -o scrolloverview.so -g `pkg-config --cflags pixman-1 libdrm hyprland pangocairo libinput libudev wayland-server xkbcommon` -std=c++2b -Wno-narrowing
+	$(CXX) -shared -fPIC $(EXTRA_FLAGS) main.cpp OverviewGesture.cpp OverviewPassElement.cpp scrollOverview.cpp -o scrolloverview.so -g `pkg-config --cflags pixman-1 libdrm hyprland pangocairo libinput libudev wayland-server xkbcommon gdk-pixbuf-2.0` `pkg-config --libs gdk-pixbuf-2.0` -std=c++2b -Wno-narrowing
 clean:
 	rm ./scrolloverview.so

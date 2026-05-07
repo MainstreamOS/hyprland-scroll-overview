@@ -17,6 +17,7 @@
 #include "IOverview.hpp"
 
 class CMonitor;
+class CTexture;
 struct wl_event_source;
 
 class CScrollOverview : public IOverview {
@@ -212,6 +213,17 @@ class CScrollOverview : public IOverview {
     CHyprSignalListener             workspaceActiveHook;
 
     bool                             swipe = false;
+
+    // Custom-wallpaper backdrop (see plugin:scrolloverview:wallpaper_path).
+    // Loaded lazily by renderGlobalWallpaper(). Cached until the path config
+    // changes, at which point both textures are dropped and reloaded.
+    // m_customWallpaperBlurredTex holds a CPU-pre-blurred copy used when
+    // plugin:scrolloverview:blur is enabled — replaces the GL blur path,
+    // which doesn't function once the cache FB is the blur source (multiple
+    // attempts via the various Hyprland blur APIs all produced GPU noise).
+    SP<CTexture>                     m_customWallpaperTex;
+    SP<CTexture>                     m_customWallpaperBlurredTex;
+    std::string                      m_lastLoadedWallpaperPath;
 
     friend class CScrollOverviewPassElement;
 };
