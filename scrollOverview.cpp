@@ -3413,6 +3413,11 @@ void CScrollOverview::renderWindowLive(PHLMONITOR monitor, PHLWINDOW window, con
 
     g_pHyprRenderer->m_renderPass.add(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{.renderModif = modif}));
     const auto firstWindowPassElement = g_pHyprRenderer->m_renderPass.m_passElements.size();
+    // Keep standalone=true. Setting it false does pull hyprbars
+    // decorations into the preview but they bypass the renderModif scale/
+    // translate above and end up misaligned (drawn at screen-space
+    // coordinates instead of inside each workspace card). Cleaner to
+    // skip title bars in previews than to render them off-position.
     g_pHyprRenderer->renderWindow(window, monitor, now, true, RENDER_PASS_ALL, true, true);
     if (!FULLSCREEN)
         roundStandaloneWindowPassElements(window, monitor, renderScale, firstWindowPassElement);
