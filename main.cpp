@@ -384,7 +384,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:gesture_distance", Hyprlang::INT{200});
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:scale", Hyprlang::FLOAT{0.5F});
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:workspace_gap", Hyprlang::INT{0});
+    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:workspace_gap", Hyprlang::INT{100});
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:wallpaper", Hyprlang::INT{0});
     // Optional path to an image file used as the global wallpaper. When set,
     // the backdrop is rendered from this file instead of by iterating
@@ -393,6 +393,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // surface texture isn't stable to capture mid-render.
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:wallpaper_path", Hyprlang::STRING{""});
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:blur", Hyprlang::INT{0});
+    // Open and close speeds are both hardcoded in scrollOverview.cpp;
+    // the bezier is also fixed (cubic ease-in-out). No user-facing
+    // config to tune the open/close animation.
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:shadow:enabled", Hyprlang::INT{0});
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:shadow:range", Hyprlang::INT{-1});
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:shadow:render_power", Hyprlang::INT{-1});

@@ -1383,7 +1383,34 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_) : started
     workspaceRemoveFadeConfig->internalStyle   = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalStyle : "";
     workspaceRemoveFadeConfig->pValues         = workspaceRemoveFadeConfig;
 
-    g_pAnimationManager->createAnimation(1.F, scale, WINDOWSMOVECONFIG, AVARDAMAGE_NONE);
+    // Hardcoded symmetric cubic ease-in-out {0.65, 0}, {0.35, 1} for
+    // the open/close zoom — gentle slow start, smooth acceleration
+    // through the middle, smooth deceleration into rest. Registered
+    // once per plugin lifetime under the name "scrolloverviewOpen".
+    if (!g_pAnimationManager->bezierExists("scrolloverviewOpen"))
+        g_pAnimationManager->addBezierWithName("scrolloverviewOpen", Vector2D{0.65, 0.0}, Vector2D{0.35, 1.0});
+
+    // Both speeds are hardcoded — no user-facing knob.
+    const float openSpeed  = 14.0F;
+    const float closeSpeed = 4.0F;
+
+    overviewOpenConfig                       = makeShared<Hyprutils::Animation::SAnimationPropertyConfig>();
+    overviewOpenConfig->overridden           = true;
+    overviewOpenConfig->internalBezier       = "scrolloverviewOpen";
+    overviewOpenConfig->internalSpeed        = openSpeed;
+    overviewOpenConfig->internalEnabled      = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalEnabled : 1;
+    overviewOpenConfig->internalStyle        = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalStyle : "";
+    overviewOpenConfig->pValues              = overviewOpenConfig;
+
+    overviewCloseConfig                      = makeShared<Hyprutils::Animation::SAnimationPropertyConfig>();
+    overviewCloseConfig->overridden          = true;
+    overviewCloseConfig->internalBezier      = "scrolloverviewOpen";
+    overviewCloseConfig->internalSpeed       = closeSpeed;
+    overviewCloseConfig->internalEnabled     = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalEnabled : 1;
+    overviewCloseConfig->internalStyle       = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalStyle : "";
+    overviewCloseConfig->pValues             = overviewCloseConfig;
+
+    g_pAnimationManager->createAnimation(1.F, scale, overviewOpenConfig, AVARDAMAGE_NONE);
     g_pAnimationManager->createAnimation({}, viewOffset, WINDOWSMOVECONFIG, AVARDAMAGE_NONE);
     g_pAnimationManager->createAnimation(1.F, workspaceInsertProgress, WINDOWSMOVECONFIG, AVARDAMAGE_NONE);
     g_pAnimationManager->createAnimation(1.F, workspaceInsertFadeProgress, workspaceInsertFadeConfig, AVARDAMAGE_NONE);
@@ -3962,6 +3989,12 @@ void CScrollOverview::close() {
     // close, not at the very end after the FB cleanup.
     if (g_pEventManager)
         g_pEventManager->postEvent(SHyprIPCEvent{.event = "scrolloverview", .data = "close"});
+
+    // Rebind `scale`'s active config so the *scale = 1.0F write below
+    // animates with the close config (snappier) instead of the slow
+    // open config bound at construction time.
+    if (scale && overviewCloseConfig)
+        scale->setConfig(overviewCloseConfig);
 
     const auto SELECTEDWORKSPACE =
         viewportCurrentWorkspace < images.size() && images[viewportCurrentWorkspace] ? images[viewportCurrentWorkspace]->pWorkspace : PHLWORKSPACE{};
