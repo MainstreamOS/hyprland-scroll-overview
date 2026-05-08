@@ -3936,8 +3936,15 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
         if (layerOwner->m_monitor != MONITOR)
             return false;
 
+        // Top / Overlay layer surfaces render *above* the overview, not
+        // through it — they don't feed the overview's blur backdrop and
+        // they aren't composited into the workspace previews. Letting
+        // their damage propagate means animating overlay UI (the bar's
+        // hot-corner ripple, hover effects, notification toasts, etc.)
+        // keeps repainting while the overview is open instead of
+        // freezing on its last pre-open frame.
         if (layerOwner->m_layer > ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM)
-            return false;
+            return true;
 
         markBlurDirty();
         if (layerOwner->m_layer == ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND)
@@ -4248,6 +4255,20 @@ void CScrollOverview::render() {
     renderPinnedFloatingWindows(MONITOR, SCALE, NOW);
 
     for (auto const& ls : MONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_TOP]) {
+        if (!Desktop::View::validMapped(ls.lock()))
+            continue;
+
+        g_pHyprRenderer->renderLayer(ls.lock(), MONITOR, NOW);
+    }
+
+    // Overlay layer renders above Top — needed so layer surfaces on
+    // WlrLayer.Overlay (e.g. dots-hyprland's hot-corner ripple) keep
+    // drawing while the overview is active. Without this loop, those
+    // surfaces freeze on whatever frame was on screen when the plugin
+    // took over renderWorkspace, since the overview's render() fully
+    // replaces Hyprland's renderAllClientsForWorkspace path which
+    // would otherwise draw both layers.
+    for (auto const& ls : MONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY]) {
         if (!Desktop::View::validMapped(ls.lock()))
             continue;
 
