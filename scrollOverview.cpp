@@ -176,6 +176,21 @@ static bool isTopLayerFocused(PHLMONITOR monitor) {
 static constexpr const char* OVERVIEW_INSERT_FADE_BEZIER = "scrolloverviewWorkspaceInsertFade";
 static constexpr const char* OVERVIEW_REMOVE_FADE_BEZIER = "scrolloverviewWorkspaceRemoveFade";
 
+// Hardcoded curve + speeds for the open/close zoom on `scale`.
+// Cubic ease-in-out — gentle slow start, smooth acceleration through
+// the middle, smooth deceleration into rest. Same bezier on both
+// sides keeps the motion symmetric in shape; only the duration
+// differs (open is deliberate, close is snappy). The bezier
+// registration lives in the constructor (not PLUGIN_INIT) because
+// HyprlandAPI::reloadConfig() — which fires on every `hyprctl
+// reload` — calls removeAllBeziers() and would wipe a one-shot
+// PLUGIN_INIT registration. The bezierExists guard keeps the
+// constructor's re-registration cheap when the bezier already
+// exists.
+static constexpr const char* OVERVIEW_OPEN_BEZIER = "scrolloverviewOpen";
+static constexpr float       OVERVIEW_OPEN_SPEED  = 14.0F;
+static constexpr float       OVERVIEW_CLOSE_SPEED = 4.0F;
+
 static bool isPointerOnTopLayer(PHLMONITOR monitor) {
     if (!monitor)
         return false;
@@ -1383,31 +1398,29 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_) : started
     workspaceRemoveFadeConfig->internalStyle   = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalStyle : "";
     workspaceRemoveFadeConfig->pValues         = workspaceRemoveFadeConfig;
 
-    // Hardcoded symmetric cubic ease-in-out {0.65, 0}, {0.35, 1} for
-    // the open/close zoom — gentle slow start, smooth acceleration
-    // through the middle, smooth deceleration into rest. Registered
-    // once per plugin lifetime under the name "scrolloverviewOpen".
-    if (!g_pAnimationManager->bezierExists("scrolloverviewOpen"))
-        g_pAnimationManager->addBezierWithName("scrolloverviewOpen", Vector2D{0.65, 0.0}, Vector2D{0.35, 1.0});
-
-    // Both speeds are hardcoded — no user-facing knob.
-    const float openSpeed  = 14.0F;
-    const float closeSpeed = 4.0F;
+    // Re-register on every overview construction. bezierExists short-
+    // circuits when it's already there; the cost is one hash lookup.
+    // Necessary because hyprctl reload wipes all beziers via
+    // removeAllBeziers() (see resetHLConfig in Hyprland), so a one-shot
+    // PLUGIN_INIT registration would silently fall back to the
+    // "default" front-loaded bezier on the next overview open.
+    if (!g_pAnimationManager->bezierExists(OVERVIEW_OPEN_BEZIER))
+        g_pAnimationManager->addBezierWithName(OVERVIEW_OPEN_BEZIER, Vector2D{0.65, 0.0}, Vector2D{0.35, 1.0});
 
     overviewOpenConfig                       = makeShared<Hyprutils::Animation::SAnimationPropertyConfig>();
     overviewOpenConfig->overridden           = true;
-    overviewOpenConfig->internalBezier       = "scrolloverviewOpen";
-    overviewOpenConfig->internalSpeed        = openSpeed;
+    overviewOpenConfig->internalBezier       = OVERVIEW_OPEN_BEZIER;
+    overviewOpenConfig->internalSpeed        = OVERVIEW_OPEN_SPEED;
     overviewOpenConfig->internalEnabled      = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalEnabled : 1;
-    overviewOpenConfig->internalStyle        = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalStyle : "";
+    overviewOpenConfig->internalStyle        = "";
     overviewOpenConfig->pValues              = overviewOpenConfig;
 
     overviewCloseConfig                      = makeShared<Hyprutils::Animation::SAnimationPropertyConfig>();
     overviewCloseConfig->overridden          = true;
-    overviewCloseConfig->internalBezier      = "scrolloverviewOpen";
-    overviewCloseConfig->internalSpeed       = closeSpeed;
+    overviewCloseConfig->internalBezier      = OVERVIEW_OPEN_BEZIER;
+    overviewCloseConfig->internalSpeed       = OVERVIEW_CLOSE_SPEED;
     overviewCloseConfig->internalEnabled     = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalEnabled : 1;
-    overviewCloseConfig->internalStyle       = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalStyle : "";
+    overviewCloseConfig->internalStyle       = "";
     overviewCloseConfig->pValues             = overviewCloseConfig;
 
     g_pAnimationManager->createAnimation(1.F, scale, overviewOpenConfig, AVARDAMAGE_NONE);
