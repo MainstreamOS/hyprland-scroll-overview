@@ -868,6 +868,26 @@ void renderOverviewWindow(const SRenderParams& params) {
             // setting this false is cheap insurance against any other
             // squishOversized-gated logic that might fire downstream.
             sfp->m_data.squishOversized = false;
+
+            // 0.55 fix: bypass the UV-crop path in
+            // IElementRenderer::calculateUVForSurface
+            // (ElementRenderer.cpp:106-109). When projSize < EXPECTED_SIZE
+            // (which is exactly our case — we scaled projSize by s but
+            // getSurfaceExpectedSize returns the window's reported native
+            // size), the renderer assumes the surface texture is bigger
+            // than the viewport and shrinks uvBR by the ratio. Result:
+            // only the top-left quarter (s*s) of the texture gets sampled
+            // into our scaled box, producing a "zoom-in / crop" effect on
+            // every overview window. The early-out at line 105
+            //     const auto SHOULD_SKIP = !pWindow || pWindow->m_animatingIn;
+            // covers our case: with pWindow nulled, SHOULD_SKIP is true,
+            // the UV adjustment is skipped, and UV stays at (0,0)..(1,1)
+            // so the full texture downsamples into the scaled box. Other
+            // pWindow uses in drawSurface degrade gracefully (no
+            // window-opaque blend optimisation, no interactive-resize
+            // alignment fix-ups) — visual correctness is the priority
+            // here.
+            sfp->m_data.pWindow = nullptr;
         }
     }
 
