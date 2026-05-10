@@ -649,12 +649,15 @@ static SOverviewShadowConfig getOverviewShadowConfig() {
 
     static auto* const* PGLOBALRANGE       = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:shadow:range")->getDataStaticPtr();
     static auto* const* PGLOBALRENDERPOWER = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:shadow:render_power")->getDataStaticPtr();
-    static auto* const* PGLOBALIGNORE      = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:shadow:ignore_window")->getDataStaticPtr();
+    // 0.55: decoration:shadow:ignore_window was removed. getConfigValue
+    // returns nullptr for unknown keys, and ->getDataStaticPtr() on null
+    // segfaults. Default to true (the previous Hyprland default) when the
+    // per-overview key isn't set.
     static auto* const* PGLOBALCOLOR       = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:shadow:color")->getDataStaticPtr();
 
     const int range       = **PRANGE >= 0 ? **PRANGE : **PGLOBALRANGE;
     const int renderPower = **PRENDERPOWER >= 0 ? **PRENDERPOWER : **PGLOBALRENDERPOWER;
-    const int ignore      = **PIGNORE >= 0 ? **PIGNORE : **PGLOBALIGNORE;
+    const int ignore      = **PIGNORE >= 0 ? **PIGNORE : 1; // 0.55: ignore_window default = true
     const auto color      = **PCOLOR >= 0 ? **PCOLOR : **PGLOBALCOLOR;
 
     return {

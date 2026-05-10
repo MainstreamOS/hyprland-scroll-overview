@@ -467,7 +467,9 @@ static void renderOverviewWindowShadow(PHLMONITOR monitor, const PHLWINDOW& wind
     static auto PSHADOWS            = CConfigValue<Hyprlang::INT>("decoration:shadow:enabled");
     static auto PSHADOWSIZE         = CConfigValue<Hyprlang::INT>("decoration:shadow:range");
     static auto PSHADOWSHARP        = CConfigValue<Hyprlang::INT>("decoration:shadow:sharp");
-    static auto PSHADOWIGNOREWINDOW = CConfigValue<Hyprlang::INT>("decoration:shadow:ignore_window");
+    // 0.55: decoration:shadow:ignore_window was removed; constructing a
+    // CConfigValue<> on an unknown key leaves its m_p null and any deref
+    // segfaults. We hardcode this to the Hyprland 0.54 default (true).
     static auto PSHADOWSCALE        = CConfigValue<Hyprlang::FLOAT>("decoration:shadow:scale");
     static auto PSHADOWOFFSET       = CConfigValue<Hyprlang::VEC2>("decoration:shadow:offset");
     static auto PSHADOWCOL          = CConfigValue<Hyprlang::INT>("decoration:shadow:color");
@@ -507,7 +509,7 @@ static void renderOverviewWindowShadow(PHLMONITOR monitor, const PHLWINDOW& wind
     data.range         = rangePx;
     data.color         = shadowColor;
     data.alpha         = metrics.targetOpacity;
-    data.ignoreWindow  = *PSHADOWIGNOREWINDOW;
+    data.ignoreWindow  = true; // 0.55: decoration:shadow:ignore_window key was removed; matches the previous Hyprland default.
     data.sharp         = *PSHADOWSHARP;
     g_pHyprRenderer->m_renderPass.add(makeUnique<COverviewShadowPassElement>(data));
 }
