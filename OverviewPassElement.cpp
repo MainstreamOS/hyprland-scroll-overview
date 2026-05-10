@@ -13,12 +13,24 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+// 0.55: more of the GL surface area went private (e.g. m_renderData,
+// renderRect/renderRoundedShadow internals). Keep the well-worn unwrap-
+// the-access-modifiers trick the plugin already uses.
+#define protected public
 #define private public
+#include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/helpers/math/Math.hpp>
 #undef private
+#undef protected
 #include <hyprutils/utils/ScopeGuard.hpp>
 #include "IOverview.hpp"
+
+// 0.55: g_pHyprOpenGL now lives in Render::GL::, m_renderData lives on
+// IHyprRenderer (pulled in from Renderer.hpp). Pull both in unqualified
+// so the function bodies below stay compact.
+using namespace Render;
+using namespace Render::GL;
 
 static CRegion roundedRectRegion(const CBox& box, int rounding, float roundingPower) {
     const auto ROUNDEDBOX = box.copy().round();
@@ -87,8 +99,11 @@ CScrollOverviewPassElement::CScrollOverviewPassElement() {
     ;
 }
 
-void CScrollOverviewPassElement::draw(const CRegion& damage) {
+// 0.55: IPassElement::draw() lost its CRegion& argument and now returns
+// std::vector<UP<IPassElement>>. We don't queue follow-up elements.
+std::vector<UP<IPassElement>> CScrollOverviewPassElement::draw() {
     g_pScrollOverview->fullRender();
+    return {};
 }
 
 bool CScrollOverviewPassElement::needsLiveBlur() {
@@ -117,20 +132,23 @@ COverviewShadowPassElement::COverviewShadowPassElement(const SData& data_) : dat
     ;
 }
 
-void COverviewShadowPassElement::draw(const CRegion& damage) {
+// 0.55: IPassElement::draw() lost its CRegion& argument and now returns
+// std::vector<UP<IPassElement>>. The "incoming" damage is the same thing
+// as g_pHyprRenderer->m_renderData.damage, so read it from there.
+std::vector<UP<IPassElement>> COverviewShadowPassElement::draw() {
     if (!data.monitor || data.fullBox.width < 1 || data.fullBox.height < 1 || data.range <= 0 || data.color.a == 0.F || data.alpha <= 0.F)
-        return;
+        return {};
 
-    CRegion shadowDamage = damage.copy().intersect(data.fullBox);
+    CRegion shadowDamage = g_pHyprRenderer->m_renderData.damage.copy().intersect(data.fullBox);
     if (data.ignoreWindow)
         shadowDamage.subtract(roundedRectRegion(data.cutoutBox, data.rounding + 1, data.roundingPower));
 
     if (shadowDamage.empty())
-        return;
+        return {};
 
-    const auto SAVEDDAMAGE = g_pHyprOpenGL->m_renderData.damage;
-    g_pHyprOpenGL->m_renderData.damage = shadowDamage;
-    auto restoreDamage = Hyprutils::Utils::CScopeGuard([SAVEDDAMAGE] { g_pHyprOpenGL->m_renderData.damage = SAVEDDAMAGE; });
+    const auto SAVEDDAMAGE = g_pHyprRenderer->m_renderData.damage;
+    g_pHyprRenderer->m_renderData.damage = shadowDamage;
+    auto restoreDamage = Hyprutils::Utils::CScopeGuard([SAVEDDAMAGE] { g_pHyprRenderer->m_renderData.damage = SAVEDDAMAGE; });
 
     auto color = data.color;
     color.a *= data.alpha;
@@ -149,6 +167,8 @@ void COverviewShadowPassElement::draw(const CRegion& damage) {
         g_pHyprOpenGL->renderRect(data.fullBox, color, {.damage = &shadowDamage, .round = data.rounding, .roundingPower = data.roundingPower});
     else
         g_pHyprOpenGL->renderRoundedShadow(data.fullBox, data.rounding, data.roundingPower, data.range, color, 1.F);
+
+    return {};
 }
 
 bool COverviewShadowPassElement::needsLiveBlur() {

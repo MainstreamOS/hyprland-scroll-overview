@@ -3,6 +3,10 @@
 #include <cmath>
 #include <dlfcn.h>
 #include <functional>
+// 0.55: more of the renderer/GL/decoration surface area went private/protected.
+// Keep the well-worn unwrap-the-access-modifiers trick the plugin uses, and
+// extend it to protected so we can keep calling renderLayer() etc.
+#define protected public
 #define private public
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/Compositor.hpp>
@@ -15,6 +19,8 @@
 #include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprland/src/managers/EventManager.hpp>
 #include <hyprland/src/plugins/PluginSystem.hpp>
+#include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp> // 0.55: ConfigDataValues.hpp removed; gradient/font/etc complex types now live in Config:: namespace here
+#include <hyprland/src/render/gl/GLTexture.hpp>                    // 0.55: CTexture split into Render::ITexture + Render::GL::CGLTexture impl
 #include <hyprland/src/render/pass/Pass.hpp>
 #include <hyprland/src/render/pass/RectPassElement.hpp>
 #include <hyprland/src/render/pass/BorderPassElement.hpp>
@@ -24,6 +30,13 @@
 #include <hyprland/src/render/decorations/DecorationPositioner.hpp>
 #include <hyprutils/utils/ScopeGuard.hpp>
 #undef private
+#undef protected
+
+// 0.55: SRenderModifData and RENDER_PASS_ALL moved into the Render::
+// namespace; g_pHyprOpenGL now lives in Render::GL::. Pull both in here.
+using namespace Render;
+using namespace Render::GL;
+
 #include "OverviewPassElement.hpp"
 #include "OverviewRender.hpp"
 
@@ -62,7 +75,7 @@ struct SHyprbarButtonMirror {
     CHyprColor   bgcol   = CHyprColor(0, 0, 0, 0);
     float        size    = 10.F;
     std::string  icon    = "";
-    SP<CTexture> iconTex = makeShared<CTexture>();
+    SP<ITexture> iconTex = makeShared<CGLTexture>(); // 0.55: CTexture split into ITexture iface + CGLTexture impl
 };
 
 struct SHyprbarGlobalStateMirror {
@@ -368,7 +381,7 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
             previousButtonSizes.push_back(button.size);
             button.size *= metrics.renderScale;
             if (button.iconTex && button.iconTex->m_texID != 0)
-                button.iconTex->destroyTexture();
+                button.iconTex.reset(); // 0.55: ITexture::destroyTexture() is gone; resetting the SP is the supported way to drop the GPU resource (the destructor handles GL cleanup).
         }
     }
 
@@ -400,7 +413,7 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
             for (size_t i = 0; i < previousButtonSizes.size() && i < HYPRBARGLOBALSTATE->buttons.size(); ++i) {
                 HYPRBARGLOBALSTATE->buttons[i].size = previousButtonSizes[i];
                 if (HYPRBARGLOBALSTATE->buttons[i].iconTex && HYPRBARGLOBALSTATE->buttons[i].iconTex->m_texID != 0)
-                    HYPRBARGLOBALSTATE->buttons[i].iconTex->destroyTexture();
+                    HYPRBARGLOBALSTATE->buttons[i].iconTex.reset(); // 0.55: ITexture::destroyTexture() is gone; resetting the SP is the supported way to drop the GPU resource (the destructor handles GL cleanup).
             }
         }
         return;
@@ -441,7 +454,7 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
             for (size_t i = 0; i < previousButtonSizes.size() && i < HYPRBARGLOBALSTATE->buttons.size(); ++i) {
                 HYPRBARGLOBALSTATE->buttons[i].size = previousButtonSizes[i];
                 if (HYPRBARGLOBALSTATE->buttons[i].iconTex && HYPRBARGLOBALSTATE->buttons[i].iconTex->m_texID != 0)
-                    HYPRBARGLOBALSTATE->buttons[i].iconTex->destroyTexture();
+                    HYPRBARGLOBALSTATE->buttons[i].iconTex.reset(); // 0.55: ITexture::destroyTexture() is gone; resetting the SP is the supported way to drop the GPU resource (the destructor handles GL cleanup).
             }
         }
     });
@@ -508,8 +521,8 @@ static void renderOverviewWindowBorder(PHLMONITOR monitor, const PHLWINDOW& wind
 
     static auto PACTIVECOL   = CConfigValue<Hyprlang::CUSTOMTYPE>("general:col.active_border");
     static auto PINACTIVECOL = CConfigValue<Hyprlang::CUSTOMTYPE>("general:col.inactive_border");
-    auto* const ACTIVECOL    = reinterpret_cast<CGradientValueData*>((PACTIVECOL.ptr())->getData());
-    auto* const INACTIVECOL  = reinterpret_cast<CGradientValueData*>((PINACTIVECOL.ptr())->getData());
+    auto* const ACTIVECOL    = reinterpret_cast<Config::CGradientValueData*>((PACTIVECOL.ptr())->getData());
+    auto* const INACTIVECOL  = reinterpret_cast<Config::CGradientValueData*>((PINACTIVECOL.ptr())->getData());
 
     const auto& grad             = selected ? window->m_ruleApplicator->activeBorderColor().valueOr(*ACTIVECOL) : window->m_ruleApplicator->inactiveBorderColor().valueOr(*INACTIVECOL);
 
@@ -548,10 +561,10 @@ static void renderOverviewGroupTabIndicators(PHLMONITOR monitor, const PHLWINDOW
     if (*PINDICATORHEIGHT <= 0)
         return;
 
-    auto* const GROUPCOLACTIVE         = sc<CGradientValueData*>((PGROUPCOLACTIVE.ptr())->getData());
-    auto* const GROUPCOLINACTIVE       = sc<CGradientValueData*>((PGROUPCOLINACTIVE.ptr())->getData());
-    auto* const GROUPCOLACTIVELOCKED   = sc<CGradientValueData*>((PGROUPCOLACTIVELOCKED.ptr())->getData());
-    auto* const GROUPCOLINACTIVELOCKED = sc<CGradientValueData*>((PGROUPCOLINACTIVELOCKED.ptr())->getData());
+    auto* const GROUPCOLACTIVE         = sc<Config::CGradientValueData*>((PGROUPCOLACTIVE.ptr())->getData());
+    auto* const GROUPCOLINACTIVE       = sc<Config::CGradientValueData*>((PGROUPCOLINACTIVE.ptr())->getData());
+    auto* const GROUPCOLACTIVELOCKED   = sc<Config::CGradientValueData*>((PGROUPCOLACTIVELOCKED.ptr())->getData());
+    auto* const GROUPCOLINACTIVELOCKED = sc<Config::CGradientValueData*>((PGROUPCOLINACTIVELOCKED.ptr())->getData());
 
     const bool  groupLocked  = window->m_group->locked() || g_pKeybindManager->m_groupsLocked;
     const auto* colActive    = groupLocked ? GROUPCOLACTIVELOCKED : GROUPCOLACTIVE;
@@ -721,7 +734,9 @@ void renderOverviewWindow(const SRenderParams& params) {
     if (shouldBlurBg) {
         OverviewRender::flushPass(params.monitor);
 
-        const float blurAlpha     = std::sqrt(params.window->m_alpha->value());
+        // 0.55: window->m_alpha is now CMultiAVarContainer (multiple alpha
+        // sources combined). Use getTotal() for the combined value.
+        const float blurAlpha     = std::sqrt(params.window->m_alpha.getTotal());
         const int   blurRounding  = fullscreen ? 0 : sc<int>(std::round(getHyprlandDecorationRounding() * metrics.pxScale));
         const float roundingPower = fullscreen ? 2.F : getHyprlandDecorationRoundingPower();
         OverviewRender::renderBlur(params.monitor, params.windowBox, blurRounding, roundingPower, blurAlpha,

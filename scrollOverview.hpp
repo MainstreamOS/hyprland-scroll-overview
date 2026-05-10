@@ -9,7 +9,8 @@
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/layout/LayoutManager.hpp>
-#include <hyprland/src/render/Framebuffer.hpp>
+#include <hyprland/src/render/Framebuffer.hpp>           // 0.55: defines Render::IFramebuffer
+#include <hyprland/src/render/gl/GLFramebuffer.hpp>      // 0.55: defines Render::CGLFramebuffer (the GL impl of IFramebuffer); we hold the backdrop blur cache as SP<CGLFramebuffer>
 #include <chrono>
 #include <unordered_map>
 #include <vector>
@@ -17,7 +18,12 @@
 #include "IOverview.hpp"
 
 class CMonitor;
-class CTexture;
+// 0.55: CTexture was split into Render::ITexture (interface) and
+// Render::GL::CGLTexture (the GL impl). Hold textures as the interface
+// type — every renderer entry point that takes a texture takes SP<ITexture>.
+namespace Render {
+    class ITexture;
+}
 struct wl_event_source;
 
 class CScrollOverview : public IOverview {
@@ -111,7 +117,11 @@ class CScrollOverview : public IOverview {
     float  lastOverviewBlurScale    = 1.F;
     int    lastBackdropWallpaperMode = -1;
     Vector2D lastOverviewBlurViewOffset = Vector2D{};
-    CFramebuffer backdropBlurFB;
+    // 0.55: CFramebuffer renamed to Render::CGLFramebuffer; m_renderData.currentFB
+    // became SP<IFramebuffer>, so we hold this as a shared_ptr now too — assignment
+    // to currentFB then works as a normal SP-to-SP-of-base copy without an
+    // address-of trick.
+    SP<Render::GL::CGLFramebuffer> backdropBlurFB;
 
     struct SWorkspaceImage {
         PHLWORKSPACE              pWorkspace;
@@ -230,8 +240,8 @@ class CScrollOverview : public IOverview {
     // plugin:scrolloverview:blur is enabled — replaces the GL blur path,
     // which doesn't function once the cache FB is the blur source (multiple
     // attempts via the various Hyprland blur APIs all produced GPU noise).
-    SP<CTexture>                     m_customWallpaperTex;
-    SP<CTexture>                     m_customWallpaperBlurredTex;
+    SP<Render::ITexture>m_customWallpaperTex;
+    SP<Render::ITexture>m_customWallpaperBlurredTex;
     std::string                      m_lastLoadedWallpaperPath;
 
     friend class CScrollOverviewPassElement;

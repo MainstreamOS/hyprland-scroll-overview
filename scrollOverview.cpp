@@ -8,6 +8,12 @@
 #include <limits>
 #include <optional>
 #include <linux/input-event-codes.h>
+// 0.55: more of the renderer/GL/decoration surface area went private/protected
+// (e.g. IHyprRenderer::renderLayer, CHyprOpenGLImpl::blurMainFramebufferWithDamage,
+// some decoration internals). Keep the unwrap-the-access-modifiers trick the
+// plugin already uses, and extend it to protected so we can keep calling
+// renderLayer().
+#define protected public
 #define private public
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/Compositor.hpp>
@@ -37,8 +43,12 @@
 #include <hyprland/src/helpers/math/Math.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/plugins/PluginSystem.hpp>
-#include <hyprland/src/config/ConfigDataValues.hpp>
+#include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp> // 0.55: ConfigDataValues.hpp removed; the gradient/font/etc complex types now live in Config:: namespace here
+#include <hyprland/src/config/shared/animation/AnimationTree.hpp>  // 0.55: animation property configs are now reached via Config::animationTree()->getAnimationPropertyConfig() instead of g_pConfigManager
+#include <hyprland/src/render/gl/GLFramebuffer.hpp>                // 0.55: CFramebuffer renamed to Render::CGLFramebuffer (or use the IFramebuffer interface)
+#include <hyprland/src/render/gl/GLTexture.hpp>                    // 0.55: CTexture split into Render::ITexture interface + Render::GL::CGLTexture impl; we instantiate CGLTexture for our wallpaper textures
 #include <hyprland/src/render/pass/BorderPassElement.hpp>
+#include <hyprland/src/render/pass/ClearPassElement.hpp>           // 0.55: CHyprOpenGLImpl::clear() is gone; clear via g_pHyprRenderer->draw(CClearPassElement::SClearData{...})
 #include <hyprland/src/render/pass/Pass.hpp>
 #include <hyprland/src/render/pass/PreBlurElement.hpp>
 #include <hyprland/src/render/pass/RectPassElement.hpp>
@@ -48,6 +58,15 @@
 #include <hyprland/src/render/decorations/DecorationPositioner.hpp>
 #include <hyprutils/utils/ScopeGuard.hpp>
 #undef private
+#undef protected
+
+// 0.55: SRenderModifData and RENDER_PASS_ALL moved into the Render::
+// namespace; g_pHyprOpenGL now lives in Render::GL::. Pull both in here
+// so the rest of this large translation unit (which uses the unqualified
+// names everywhere) keeps compiling without per-call namespace edits.
+using namespace Render;
+using namespace Render::GL;
+
 #include "OverviewPassElement.hpp"
 #include "OverviewRender.hpp"
 #include "Window.hpp"
@@ -278,8 +297,22 @@ static bool windowHasOverviewAnimation(const PHLWINDOW& window) {
     if (!window)
         return false;
 
-    return window->m_realPosition->isBeingAnimated() || window->m_realSize->isBeingAnimated() || window->m_alpha->isBeingAnimated() ||
-        window->m_activeInactiveAlpha->isBeingAnimated() || window->m_movingFromWorkspaceAlpha->isBeingAnimated() || window->m_movingToWorkspaceAlpha->isBeingAnimated() ||
+    // 0.55: window->m_alpha is now Desktop::Types::CMultiAVarContainer
+    // (multiple alpha sources combined), not a single PHLANIMVAR. Treat
+    // "any of them animating" as "the window's alpha is animating".
+    bool anyAlphaAnimating = false;
+    for (const auto& v : window->m_alpha.all()) {
+        if (v && v->isBeingAnimated()) {
+            anyAlphaAnimating = true;
+            break;
+        }
+    }
+    // 0.55: m_activeInactiveAlpha / m_movingFromWorkspaceAlpha /
+    // m_movingToWorkspaceAlpha collapsed into m_alpha (the
+    // CMultiAVarContainer above), so the per-source isBeingAnimated()
+    // checks are subsumed by the loop above. Only the non-alpha animvars
+    // (still PHLANIMVAR<...>) need their own checks here.
+    return window->m_realPosition->isBeingAnimated() || window->m_realSize->isBeingAnimated() || anyAlphaAnimating ||
         window->m_borderFadeAnimationProgress->isBeingAnimated() || window->m_borderAngleAnimationProgress->isBeingAnimated() || window->m_dimPercent->isBeingAnimated() ||
         window->m_realShadowColor->isBeingAnimated();
 }
@@ -291,9 +324,10 @@ static bool layerHasOverviewAnimation(const PHLLS& layer) {
     return layer->m_realPosition->isBeingAnimated() || layer->m_realSize->isBeingAnimated() || layer->m_alpha->isBeingAnimated();
 }
 
-static CCssGapData getOverviewWindowHitboxGap() {
+// 0.55: CCssGapData moved into the Config:: namespace.
+static Config::CCssGapData getOverviewWindowHitboxGap() {
     static auto PGAPSIN = CConfigValue<Hyprlang::CUSTOMTYPE>("general:gaps_in");
-    return *sc<CCssGapData*>((PGAPSIN.ptr())->getData());
+    return *sc<Config::CCssGapData*>((PGAPSIN.ptr())->getData());
 }
 
 static CBox getOverviewWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float scale, const Vector2D& viewOffset, float yoff) {
@@ -862,12 +896,12 @@ static void moveOverviewTargetNextToWindow(const SP<Layout::ITarget>& target, co
 }
 
 CScrollOverview::~CScrollOverview() {
-    g_pHyprRenderer->makeEGLCurrent();
+    g_pHyprOpenGL->makeEGLCurrent(); // 0.55: makeEGLCurrent lives on CHyprOpenGLImpl, not the renderer interface
     if (realtimePreviewTimer) {
         wl_event_source_remove(realtimePreviewTimer);
         realtimePreviewTimer = nullptr;
     }
-    backdropBlurFB.release();
+    if (backdropBlurFB) backdropBlurFB->release();
     const auto MONITOR = pMonitor.lock();
     const auto WORKSPACE = MONITOR ? MONITOR->m_activeWorkspace : PHLWORKSPACE{};
     emitFullscreenVisibilityState(getOverviewFullscreenVisibilityWindow(WORKSPACE, Desktop::focusState()->window()), false);
@@ -877,7 +911,12 @@ CScrollOverview::~CScrollOverview() {
     restoreForcedLayerVisibility();
     images.clear(); // otherwise we get a vram leak
     Cursor::overrideController->unsetOverride(Cursor::CURSOR_OVERRIDE_SPECIAL_ACTION);
-    g_pHyprOpenGL->markBlurDirtyForMonitor(pMonitor.lock());
+    // 0.55: markBlurDirtyForMonitor is no longer exposed. Damaging the
+    // monitor through the public renderer is the closest equivalent —
+    // it forces a full redraw next frame, which lets the blur paths
+    // recompute their internal caches on demand.
+    if (const auto MON = pMonitor.lock())
+        g_pHyprRenderer->damageMonitor(MON);
 }
 
 CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_) : startedOn(startedOn_), swipe(swipe_) {
@@ -897,7 +936,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_) : started
     realtimePreviewTimer = wl_event_loop_add_timer(g_pCompositor->m_wlEventLoop, realtimePreviewTimerCallback, this);
     scheduleMinimumPreviewFrame();
 
-    const auto WINDOWSMOVECONFIG = g_pConfigManager->getAnimationPropertyConfig("windowsMove");
+    const auto WINDOWSMOVECONFIG = Config::animationTree()->getAnimationPropertyConfig("windowsMove"); // 0.55: g_pConfigManager removed; animation property configs now reached via the Config::animationTree() free function
     const auto WINDOWSMOVEVALUES = WINDOWSMOVECONFIG && WINDOWSMOVECONFIG->pValues ? WINDOWSMOVECONFIG->pValues.lock() : WINDOWSMOVECONFIG;
     if (!g_pAnimationManager->bezierExists(OVERVIEW_INSERT_FADE_BEZIER))
         g_pAnimationManager->addBezierWithName(OVERVIEW_INSERT_FADE_BEZIER, Vector2D{0.5, 0.0}, Vector2D{0.5, 0.0});
@@ -1396,7 +1435,7 @@ void CScrollOverview::renderGlobalWallpaper(PHLMONITOR monitor, const Time::stea
                     cairo_surface_mark_dirty(SURF);
 
                     if (!m_customWallpaperTex)
-                        m_customWallpaperTex = makeShared<CTexture>(DRM_FORMAT_XRGB8888, PIXELS, (uint32_t)STRIDE, Vector2D{(double)W, (double)H});
+                        m_customWallpaperTex = makeShared<CGLTexture>(DRM_FORMAT_XRGB8888, PIXELS, (uint32_t)STRIDE, Vector2D{(double)W, (double)H});
 
                     // Build a CPU-pre-blurred texture for the blur=true
                     // case. Pipeline:
@@ -1461,7 +1500,7 @@ void CScrollOverview::renderGlobalWallpaper(PHLMONITOR monitor, const Time::stea
                         }
                         cairo_surface_mark_dirty(BIG);
 
-                        m_customWallpaperBlurredTex = makeShared<CTexture>(DRM_FORMAT_XRGB8888, B_PIXELS, (uint32_t)B_STRIDE, Vector2D{(double)W, (double)H});
+                        m_customWallpaperBlurredTex = makeShared<CGLTexture>(DRM_FORMAT_XRGB8888, B_PIXELS, (uint32_t)B_STRIDE, Vector2D{(double)W, (double)H});
                         cairo_surface_destroy(BIG);
                     }
                 }
@@ -1470,7 +1509,8 @@ void CScrollOverview::renderGlobalWallpaper(PHLMONITOR monitor, const Time::stea
                 cairo_surface_destroy(SURF);
         }
 
-        const SP<CTexture> TEX = (WANTBLUR && m_customWallpaperBlurredTex) ? m_customWallpaperBlurredTex : m_customWallpaperTex;
+        // 0.55: SP<CTexture> -> SP<ITexture> (interface).
+        const SP<ITexture> TEX = (WANTBLUR && m_customWallpaperBlurredTex) ? m_customWallpaperBlurredTex : m_customWallpaperTex;
         if (TEX && TEX->m_size.x > 0 && TEX->m_size.y > 0) {
             // Cover-fit: scale to fill monitor while preserving aspect ratio,
             // centered. Excess hangs off framebuffer edges; FB scissor clips.
@@ -1506,25 +1546,34 @@ void CScrollOverview::updateBackdropBlurCache(PHLMONITOR monitor, int wallpaperM
     }
 
     const auto FBFORMAT = getOverviewFramebufferFormat(monitor);
-    if (!backdropBlurFB.isAllocated() || backdropBlurFB.m_size != monitor->m_pixelSize || backdropBlurFB.m_drmFormat != FBFORMAT) {
-        backdropBlurFB.release();
-        backdropBlurFB.alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, FBFORMAT);
+    // 0.55: Lazy first-allocation. backdropBlurFB is now SP<CGLFramebuffer>,
+    // starts null. Construct on first render after the plugin (re-)loads.
+    if (!backdropBlurFB)
+        backdropBlurFB = makeShared<CGLFramebuffer>();
+    if (!backdropBlurFB->isAllocated() || backdropBlurFB->m_size != monitor->m_pixelSize || backdropBlurFB->m_drmFormat != FBFORMAT) {
+        backdropBlurFB->release();
+        backdropBlurFB->alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, FBFORMAT);
         backdropBlurDirty = true;
     }
 
     if (!backdropBlurDirty)
         return;
 
-    auto* const SAVEDFB = g_pHyprOpenGL->m_renderData.currentFB;
-    backdropBlurFB.bind();
-    g_pHyprOpenGL->m_renderData.currentFB = &backdropBlurFB;
+    // 0.55: currentFB is SP<IFramebuffer> on the renderer's m_renderData;
+    // save/restore by value-copying the SP, then assigning ours (an
+    // SP<CGLFramebuffer>) which up-converts to SP<IFramebuffer> implicitly.
+    SP<IFramebuffer> SAVEDFB = g_pHyprRenderer->m_renderData.currentFB;
+    backdropBlurFB->bind();
+    g_pHyprRenderer->m_renderData.currentFB = backdropBlurFB;
     auto restoreFB = Hyprutils::Utils::CScopeGuard([SAVEDFB] {
         if (SAVEDFB)
             SAVEDFB->bind();
 
-        g_pHyprOpenGL->m_renderData.currentFB = SAVEDFB;
+        g_pHyprRenderer->m_renderData.currentFB = SAVEDFB;
     });
-    g_pHyprOpenGL->clear(CHyprColor{0.F, 0.F, 0.F, 1.F});
+    // 0.55: CHyprOpenGLImpl::clear() is gone; clear via a CClearPassElement
+    // queued onto the renderer pass.
+    g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.F, 0.F, 0.F, 1.F}});
 
     // Blur is baked into the texture by renderGlobalWallpaper itself
     // (cairo pyramid). Hyprland's GL blur paths
@@ -1540,11 +1589,11 @@ void CScrollOverview::updateBackdropBlurCache(PHLMONITOR monitor, int wallpaperM
 }
 
 void CScrollOverview::renderBackdropBlurCache(PHLMONITOR monitor) {
-    if (!monitor || !backdropBlurFB.isAllocated() || !backdropBlurFB.getTexture())
+    if (!monitor || !backdropBlurFB || !backdropBlurFB->isAllocated() || !backdropBlurFB->getTexture())
         return;
 
     CRegion fullDamage{CBox{{}, monitor->m_transformedSize}};
-    const auto TEX = backdropBlurFB.getTexture();
+    const auto TEX = backdropBlurFB->getTexture();
     const auto SAVEDTRANSFORM = TEX->m_transform;
     TEX->m_transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
     auto restoreTransform = Hyprutils::Utils::CScopeGuard([TEX, SAVEDTRANSFORM] { TEX->m_transform = SAVEDTRANSFORM; });
@@ -3640,7 +3689,8 @@ void CScrollOverview::render() {
     } else if (WALLPAPERMODE == 0 || WALLPAPERMODE == 2) {
         renderGlobalWallpaper(MONITOR, NOW);
     } else
-        g_pHyprOpenGL->clear(CHyprColor{0.F, 0.F, 0.F, 1.F});
+        // 0.55: CHyprOpenGLImpl::clear() is gone; clear via CClearPassElement.
+        g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.F, 0.F, 0.F, 1.F}});
 
     Event::bus()->m_events.render.stage.emit(RENDER_POST_WALLPAPER);
 
