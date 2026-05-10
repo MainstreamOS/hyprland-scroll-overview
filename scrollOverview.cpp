@@ -324,10 +324,12 @@ static bool layerHasOverviewAnimation(const PHLLS& layer) {
     return layer->m_realPosition->isBeingAnimated() || layer->m_realSize->isBeingAnimated() || layer->m_alpha->isBeingAnimated();
 }
 
-// 0.55: CCssGapData moved into the Config:: namespace.
+// 0.55: CCssGapData moved into the Config:: namespace; complex/custom-type
+// config values must be read via the CConfigValue<Config::IComplexConfigValue>
+// specialization, or ptr() reads m_p (legacy path) which is null and crashes.
 static Config::CCssGapData getOverviewWindowHitboxGap() {
-    static auto PGAPSIN = CConfigValue<Hyprlang::CUSTOMTYPE>("general:gaps_in");
-    return *sc<Config::CCssGapData*>((PGAPSIN.ptr())->getData());
+    static auto PGAPSIN = CConfigValue<Config::IComplexConfigValue>("general:gaps_in");
+    return *sc<Config::CCssGapData*>(PGAPSIN.ptr());
 }
 
 static CBox getOverviewWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float scale, const Vector2D& viewOffset, float yoff) {

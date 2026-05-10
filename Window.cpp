@@ -521,10 +521,17 @@ static void renderOverviewWindowBorder(PHLMONITOR monitor, const PHLWINDOW& wind
     if (metrics.borderSize <= 0.F)
         return;
 
-    static auto PACTIVECOL   = CConfigValue<Hyprlang::CUSTOMTYPE>("general:col.active_border");
-    static auto PINACTIVECOL = CConfigValue<Hyprlang::CUSTOMTYPE>("general:col.inactive_border");
-    auto* const ACTIVECOL    = reinterpret_cast<Config::CGradientValueData*>((PACTIVECOL.ptr())->getData());
-    auto* const INACTIVECOL  = reinterpret_cast<Config::CGradientValueData*>((PINACTIVECOL.ptr())->getData());
+    // 0.55: complex/custom-type config values now go through the
+    // IComplexConfigValue specialization of CConfigValue (m_hlangp path
+    // instead of the legacy m_p). The generic Hyprlang::CUSTOMTYPE
+    // template's ptr() reads m_p only, so it segfaults on null when the
+    // value lives on the Hyprlang side. Hyprland's own CGradientValue /
+    // CCssGapValue switched to CConfigValue<Config::IComplexConfigValue>
+    // for this exact reason.
+    static auto PACTIVECOL   = CConfigValue<Config::IComplexConfigValue>("general:col.active_border");
+    static auto PINACTIVECOL = CConfigValue<Config::IComplexConfigValue>("general:col.inactive_border");
+    auto* const ACTIVECOL    = sc<Config::CGradientValueData*>(PACTIVECOL.ptr());
+    auto* const INACTIVECOL  = sc<Config::CGradientValueData*>(PINACTIVECOL.ptr());
 
     const auto& grad             = selected ? window->m_ruleApplicator->activeBorderColor().valueOr(*ACTIVECOL) : window->m_ruleApplicator->inactiveBorderColor().valueOr(*INACTIVECOL);
 
@@ -555,18 +562,21 @@ static void renderOverviewGroupTabIndicators(PHLMONITOR monitor, const PHLWINDOW
     static auto PROUNDINGPOWER          = CConfigValue<Hyprlang::FLOAT>("group:groupbar:rounding_power");
     static auto POUTERGAP               = CConfigValue<Hyprlang::INT>("group:groupbar:gaps_out");
     static auto PINNERGAP               = CConfigValue<Hyprlang::INT>("group:groupbar:gaps_in");
-    static auto PGROUPCOLACTIVE         = CConfigValue<Hyprlang::CUSTOMTYPE>("group:groupbar:col.active");
-    static auto PGROUPCOLINACTIVE       = CConfigValue<Hyprlang::CUSTOMTYPE>("group:groupbar:col.inactive");
-    static auto PGROUPCOLACTIVELOCKED   = CConfigValue<Hyprlang::CUSTOMTYPE>("group:groupbar:col.locked_active");
-    static auto PGROUPCOLINACTIVELOCKED = CConfigValue<Hyprlang::CUSTOMTYPE>("group:groupbar:col.locked_inactive");
+    // 0.55: see comment on the border-color reads above — gradient
+    // CUSTOMTYPE config values must come through the IComplexConfigValue
+    // specialization or .ptr() segfaults.
+    static auto PGROUPCOLACTIVE         = CConfigValue<Config::IComplexConfigValue>("group:groupbar:col.active");
+    static auto PGROUPCOLINACTIVE       = CConfigValue<Config::IComplexConfigValue>("group:groupbar:col.inactive");
+    static auto PGROUPCOLACTIVELOCKED   = CConfigValue<Config::IComplexConfigValue>("group:groupbar:col.locked_active");
+    static auto PGROUPCOLINACTIVELOCKED = CConfigValue<Config::IComplexConfigValue>("group:groupbar:col.locked_inactive");
 
     if (*PINDICATORHEIGHT <= 0)
         return;
 
-    auto* const GROUPCOLACTIVE         = sc<Config::CGradientValueData*>((PGROUPCOLACTIVE.ptr())->getData());
-    auto* const GROUPCOLINACTIVE       = sc<Config::CGradientValueData*>((PGROUPCOLINACTIVE.ptr())->getData());
-    auto* const GROUPCOLACTIVELOCKED   = sc<Config::CGradientValueData*>((PGROUPCOLACTIVELOCKED.ptr())->getData());
-    auto* const GROUPCOLINACTIVELOCKED = sc<Config::CGradientValueData*>((PGROUPCOLINACTIVELOCKED.ptr())->getData());
+    auto* const GROUPCOLACTIVE         = sc<Config::CGradientValueData*>(PGROUPCOLACTIVE.ptr());
+    auto* const GROUPCOLINACTIVE       = sc<Config::CGradientValueData*>(PGROUPCOLINACTIVE.ptr());
+    auto* const GROUPCOLACTIVELOCKED   = sc<Config::CGradientValueData*>(PGROUPCOLACTIVELOCKED.ptr());
+    auto* const GROUPCOLINACTIVELOCKED = sc<Config::CGradientValueData*>(PGROUPCOLINACTIVELOCKED.ptr());
 
     const bool  groupLocked  = window->m_group->locked() || g_pKeybindManager->m_groupsLocked;
     const auto* colActive    = groupLocked ? GROUPCOLACTIVELOCKED : GROUPCOLACTIVE;
