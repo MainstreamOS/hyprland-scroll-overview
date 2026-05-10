@@ -755,21 +755,124 @@ void renderOverviewWindow(const SRenderParams& params) {
                                    params.usePrecomputedBlur || params.window->m_ruleApplicator->xray().valueOr(false));
     }
 
-    SRenderModifData modif;
-    modif.modifs.emplace_back(SRenderModifData::RMOD_TYPE_SCALE, params.renderScale);
-    modif.modifs.emplace_back(SRenderModifData::RMOD_TYPE_TRANSLATE, params.windowBox.pos());
-
     std::vector<SSurfaceOpacityOverride> surfaceOpacityOverrides;
     surfaceOpacityOverrides.reserve(4);
     overrideWindowSurfaceOpacity(params.window, surfaceOpacityOverrides, metrics.targetOpacity);
     auto restoreSurfaceOpacities = Hyprutils::Utils::CScopeGuard([&surfaceOpacityOverrides] { restoreSurfaceOpacityOverrides(surfaceOpacityOverrides); });
 
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{.renderModif = modif}));
+    // 0.55 fix: do NOT use renderModif TRANSLATE here. In Hyprland 0.55,
+    // CSurfacePassElement::visibleRegion (SurfacePassElement.cpp:174) builds
+    // the GL scissor from m_data.pos + m_data.localPos (pre-renderModif
+    // position), while renderTextureInternal (OpenGL.cpp:1455-1456) applies
+    // renderModif to the geometry box. Result: a renderModif TRANSLATE shifts
+    // the rendered geometry but NOT the scissor — the right-half-of-monitor
+    // workspace card windows render at e.g. x=1933 but get scissored to
+    // (0..pre-translate-width). Verified by reading the Hyprland 0.55 source
+    // tree at /home/itsjustdroid/Documents/GitHub/Hyprland.
+    //
+    // Workaround: instead of using renderModif, mutate each queued
+    // CSurfacePassElement directly:
+    //   - localPos += windowBox.pos() in logical (so getTexBox/visibleRegion
+    //     produce post-translate coordinates and the scissor matches).
+    //   - w/h pre-scaled by renderScale (since we no longer apply SCALE via
+    //     renderModif).
+    // No renderModif means no geometry/scissor mismatch.
     const auto firstWindowPassElement = g_pHyprRenderer->m_renderPass.m_passElements.size();
+
+    if (::ScrollOverviewLog::debugEnabled()) {
+        using namespace std::chrono;
+        static auto lastDump = steady_clock::time_point{};
+        const auto  now      = steady_clock::now();
+        if (now - lastDump > seconds(1)) {
+            lastDump            = now;
+            const auto& rd     = g_pHyprRenderer->m_renderData;
+            auto        fbInfo = [](const SP<IFramebuffer>& fb) -> std::string {
+                if (!fb)
+                    return "null";
+                return std::format("{}x{} alloc={}", fb->m_size.x, fb->m_size.y, fb->isAllocated());
+            };
+            const auto  monPtr     = rd.pMonitor.lock();
+            const char* monName    = monPtr ? monPtr->m_name.c_str() : "<null>";
+            const auto  monPxSizeX = monPtr ? monPtr->m_pixelSize.x : 0.0;
+            const auto  monPxSizeY = monPtr ? monPtr->m_pixelSize.y : 0.0;
+            SOLOG(::Log::INFO,
+                  "renderOverviewWindow: renderer geometry: "
+                  "fbSize=({:.0f},{:.0f}) currentFB=[{}] mainFB=[{}] outFB=[{}] "
+                  "pMonitor={} m_pixelSize=({:.0f},{:.0f}) projectionType={}",
+                  rd.fbSize.x, rd.fbSize.y, fbInfo(rd.currentFB), fbInfo(rd.mainFB), fbInfo(rd.outFB), monName, monPxSizeX, monPxSizeY, sc<int>(rd.projectionType));
+        }
+    }
+
     g_pHyprRenderer->renderWindow(params.window, params.monitor, params.now, true, RENDER_PASS_ALL, true, true);
+
+    // Apply SCALE + TRANSLATE directly on each queued surface pass element
+    // (replaces what renderModif used to do, but in a way that keeps the
+    // scissor / geometry in the same coordinate space — see comment above).
+    // Logical coordinate = physical / monitor.m_scale; getTexBox internally
+    // multiplies pos+localPos by monitor.m_scale at drawSurface, so we add
+    // logical here.
+    //
+    // For sub-surfaces, the existing localPos is the offset INSIDE the
+    // parent. When the parent shrinks (w *= s, h *= s) that intra-window
+    // offset has to shrink too, otherwise sub-surfaces float outside the
+    // scaled parent box. Scale the existing localPos by s before adding
+    // the workspace-card translation. The main surface's localPos is 0
+    // (renderWindow with ignorePosition=true), so the scale is a no-op
+    // for it.
+    {
+        const Vector2D translateLogical = params.windowBox.pos() / params.monitor->m_scale;
+        const float    s                = params.renderScale;
+        auto&          passElements     = g_pHyprRenderer->m_renderPass.m_passElements;
+        for (size_t i = firstWindowPassElement; i < passElements.size(); ++i) {
+            const auto& pe = passElements[i];
+            if (!pe || !pe->element)
+                continue;
+            auto* sfp = dynamic_cast<CSurfacePassElement*>(pe->element.get());
+            if (!sfp)
+                continue;
+
+            // Approach: let CSurfacePassElement::getTexBox compute the natural
+            // (pre-overview-scale) tex box first — this respects all of
+            // Hyprland's surface logic (small/viewport-corrected surfaces,
+            // subsurfaces using m_current.size, mainSurface vs not, etc.).
+            // Then override the cached result with our scaled + translated
+            // version. Because m_texBoxCached short-circuits getTexBox, every
+            // future call (visibleRegion's getTexBox, drawSurface's
+            // getTexBox, etc.) returns our scaled box without re-running
+            // the conditional logic that would reset width to SIZE.x for
+            // small surfaces (zen-browser-style) or to SURFSIZE for
+            // subsurfaces. Position is the natural box's pos scaled by s
+            // around origin then translated by translateLogical — which
+            // mirrors what an RMOD_TYPE_SCALE+TRANSLATE renderModif would
+            // have produced, but baked into the box itself so the geometry
+            // and the scissor (built from the same getTexBox in
+            // visibleRegion) stay in lockstep.
+            const auto naturalTexBox = sfp->getTexBox(); // populates m_cachedTexBox / m_texBoxCached
+            sfp->m_cachedTexBox      = CBox{
+                naturalTexBox.x * s + translateLogical.x,
+                naturalTexBox.y * s + translateLogical.y,
+                naturalTexBox.width * s,
+                naturalTexBox.height * s,
+            };
+
+            // visibleRegion (SurfacePassElement.cpp:174) translates the
+            // scissor by `(m_data.pos + m_data.localPos - m_data.pMonitor->m_position) * monitor.scale`.
+            // For the scissor to land on the same physical position as our
+            // overridden cachedTexBox, m_data.localPos must equal the
+            // cached box's logical position (since m_data.pos and the
+            // monitor offset cancel for ignorePosition=true rendering).
+            sfp->m_data.localPos = sfp->m_data.localPos * s + translateLogical;
+
+            // squishOversized's `localPos.x > 0` clamp in getTexBox is
+            // dormant now that the cache short-circuits the function, but
+            // setting this false is cheap insurance against any other
+            // squishOversized-gated logic that might fire downstream.
+            sfp->m_data.squishOversized = false;
+        }
+    }
+
     if (!fullscreen)
         roundStandaloneWindowPassElements(params.window, params.monitor, params.renderScale, firstWindowPassElement);
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{.renderModif = SRenderModifData{}}));
 
     renderOverviewCustomDecorations(params.monitor, params.window, params.workspaceBox ? *params.workspaceBox : CBox{}, params.windowBox, metrics, DECORATION_LAYER_OVER);
     renderOverviewCustomDecorations(params.monitor, params.window, params.workspaceBox ? *params.workspaceBox : CBox{}, params.windowBox, metrics, DECORATION_LAYER_OVERLAY);
