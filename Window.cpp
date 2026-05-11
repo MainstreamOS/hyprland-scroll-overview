@@ -779,30 +779,6 @@ void renderOverviewWindow(const SRenderParams& params) {
     // No renderModif means no geometry/scissor mismatch.
     const auto firstWindowPassElement = g_pHyprRenderer->m_renderPass.m_passElements.size();
 
-    if (::ScrollOverviewLog::debugEnabled()) {
-        using namespace std::chrono;
-        static auto lastDump = steady_clock::time_point{};
-        const auto  now      = steady_clock::now();
-        if (now - lastDump > seconds(1)) {
-            lastDump            = now;
-            const auto& rd     = g_pHyprRenderer->m_renderData;
-            auto        fbInfo = [](const SP<IFramebuffer>& fb) -> std::string {
-                if (!fb)
-                    return "null";
-                return std::format("{}x{} alloc={}", fb->m_size.x, fb->m_size.y, fb->isAllocated());
-            };
-            const auto  monPtr     = rd.pMonitor.lock();
-            const char* monName    = monPtr ? monPtr->m_name.c_str() : "<null>";
-            const auto  monPxSizeX = monPtr ? monPtr->m_pixelSize.x : 0.0;
-            const auto  monPxSizeY = monPtr ? monPtr->m_pixelSize.y : 0.0;
-            SOLOG(::Log::INFO,
-                  "renderOverviewWindow: renderer geometry: "
-                  "fbSize=({:.0f},{:.0f}) currentFB=[{}] mainFB=[{}] outFB=[{}] "
-                  "pMonitor={} m_pixelSize=({:.0f},{:.0f}) projectionType={}",
-                  rd.fbSize.x, rd.fbSize.y, fbInfo(rd.currentFB), fbInfo(rd.mainFB), fbInfo(rd.outFB), monName, monPxSizeX, monPxSizeY, sc<int>(rd.projectionType));
-        }
-    }
-
     g_pHyprRenderer->renderWindow(params.window, params.monitor, params.now, true, RENDER_PASS_ALL, true, true);
 
     // Apply SCALE + TRANSLATE directly on each queued surface pass element
