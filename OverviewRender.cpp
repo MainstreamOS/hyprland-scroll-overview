@@ -42,9 +42,33 @@ void renderBlur(PHLMONITOR monitor, const CBox& windowBox, int rounding, float r
 
     // 0.55: blurMainFramebufferWithDamage went private and now needs a
     // CGLFramebuffer& source argument; the public renderer entry point
-    // does the same job, manages its own framebuffer state, and returns
-    // the blurred texture directly — no save/restore of currentFB needed.
+    // (blurMainFramebuffer) blurs whatever m_renderData.currentFB is
+    // currently bound to. That's a subtle behaviour change from the 0.54
+    // implementation which always blurred the monitor's main framebuffer.
+    //
+    // In this plugin's call sequence renderBlur fires while currentFB is
+    // pointing at a scratch / temporary FB (see /tmp/scrolloverview.log
+    // diagnostic during the 0.55 port: currentFB != mainFB, but currentFB
+    // is allocated and has a texture — just not the rendered desktop).
+    // Blurring that produces "noise" — blurMainFramebuffer succeeds and
+    // returns a non-null texture, but it's a blur of uninitialised pixel
+    // data because nothing has yet been rendered into the scratch FB.
+    //
+    // Pin currentFB to mainFB for the duration of the blurMainFramebuffer
+    // call so it reads from the monitor's actual content. Restore after.
+    // We can't store/restore SP<IFramebuffer> by raw pointer round-trip
+    // without exposing the renderer's internals, so check which SP owned
+    // the previous raw pointer and rebind via that.
+    auto* const SAVED_CURRENTFB = g_pHyprRenderer->m_renderData.currentFB.get();
+    if (g_pHyprRenderer->m_renderData.mainFB)
+        g_pHyprRenderer->m_renderData.currentFB = g_pHyprRenderer->m_renderData.mainFB;
     const auto BLURREDTEXTURE = g_pHyprRenderer ? g_pHyprRenderer->blurMainFramebuffer(alpha, &blurDamage) : SP<ITexture>{};
+    if (SAVED_CURRENTFB) {
+        if (g_pHyprRenderer->m_renderData.mainFB && g_pHyprRenderer->m_renderData.mainFB.get() == SAVED_CURRENTFB)
+            g_pHyprRenderer->m_renderData.currentFB = g_pHyprRenderer->m_renderData.mainFB;
+        else if (g_pHyprRenderer->m_renderData.outFB && g_pHyprRenderer->m_renderData.outFB.get() == SAVED_CURRENTFB)
+            g_pHyprRenderer->m_renderData.currentFB = g_pHyprRenderer->m_renderData.outFB;
+    }
     if (!BLURREDTEXTURE)
         return;
 
