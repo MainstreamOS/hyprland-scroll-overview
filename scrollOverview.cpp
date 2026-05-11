@@ -1532,9 +1532,7 @@ void CScrollOverview::updateBackdropBlurCache(PHLMONITOR monitor, int wallpaperM
     // renderRect+blur=true) all produce noise against this cache FB —
     // verified empirically across multiple builds.
     renderGlobalWallpaper(monitor, now);
-
     OverviewRender::flushPass(monitor);
-    OverviewRender::renderBlur(monitor, CBox{{}, monitor->m_size * monitor->m_scale}, 0, 2.F, 1.F, false);
 
     backdropBlurDirty = false;
 }
