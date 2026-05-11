@@ -192,7 +192,7 @@ static constexpr const char* OVERVIEW_REMOVE_FADE_BEZIER = "scrolloverviewWorksp
 // constructor's re-registration cheap when the bezier already
 // exists.
 static constexpr const char* OVERVIEW_OPEN_BEZIER = "scrolloverviewOpen";
-static constexpr float       OVERVIEW_OPEN_SPEED  = 14.0F;
+static constexpr float       OVERVIEW_OPEN_SPEED  = 8.0F;
 static constexpr float       OVERVIEW_CLOSE_SPEED = 4.0F;
 
 static bool isPointerOnTopLayer(PHLMONITOR monitor) {
