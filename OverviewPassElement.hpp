@@ -7,14 +7,20 @@ class CScrollOverviewPassElement : public IPassElement {
     CScrollOverviewPassElement();
     virtual ~CScrollOverviewPassElement() = default;
 
-    virtual void                draw(const CRegion& damage);
-    virtual bool                needsLiveBlur();
-    virtual bool                needsPrecomputeBlur();
-    virtual std::optional<CBox> boundingBox();
-    virtual CRegion             opaqueRegion();
+    // 0.55: IPassElement::draw() lost its CRegion& argument and now returns
+    // std::vector<UP<IPassElement>>; type() became pure virtual.
+    virtual std::vector<UP<IPassElement>> draw();
+    virtual bool                          needsLiveBlur();
+    virtual bool                          needsPrecomputeBlur();
+    virtual std::optional<CBox>           boundingBox();
+    virtual CRegion                       opaqueRegion();
 
-    virtual const char*         passName() {
+    virtual const char* passName() {
         return "CScrollOverviewPassElement";
+    }
+
+    virtual ePassElementType type() {
+        return EK_CUSTOM;
     }
 };
 
@@ -37,14 +43,20 @@ class COverviewShadowPassElement : public IPassElement {
     COverviewShadowPassElement(const SData& data_);
     virtual ~COverviewShadowPassElement() = default;
 
-    virtual void                draw(const CRegion& damage);
-    virtual bool                needsLiveBlur();
-    virtual bool                needsPrecomputeBlur();
-    virtual std::optional<CBox> boundingBox();
-    virtual CRegion             opaqueRegion();
+    // 0.55: IPassElement::draw() lost its CRegion& argument and now returns
+    // std::vector<UP<IPassElement>>; type() became pure virtual.
+    virtual std::vector<UP<IPassElement>> draw();
+    virtual bool                          needsLiveBlur();
+    virtual bool                          needsPrecomputeBlur();
+    virtual std::optional<CBox>           boundingBox();
+    virtual CRegion                       opaqueRegion();
 
-    virtual const char*         passName() {
+    virtual const char* passName() {
         return "COverviewShadowPassElement";
+    }
+
+    virtual ePassElementType type() {
+        return EK_CUSTOM;
     }
 
   private:

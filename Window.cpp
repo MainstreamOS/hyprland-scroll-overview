@@ -3,6 +3,10 @@
 #include <cmath>
 #include <dlfcn.h>
 #include <functional>
+// 0.55: more of the renderer/GL/decoration surface area went private/protected.
+// Keep the well-worn unwrap-the-access-modifiers trick the plugin uses, and
+// extend it to protected so we can keep calling renderLayer() etc.
+#define protected public
 #define private public
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/Compositor.hpp>
@@ -15,6 +19,8 @@
 #include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprland/src/managers/EventManager.hpp>
 #include <hyprland/src/plugins/PluginSystem.hpp>
+#include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp> // 0.55: ConfigDataValues.hpp removed; gradient/font/etc complex types now live in Config:: namespace here
+#include <hyprland/src/render/gl/GLTexture.hpp>                    // 0.55: CTexture split into Render::ITexture + Render::GL::CGLTexture impl
 #include <hyprland/src/render/pass/Pass.hpp>
 #include <hyprland/src/render/pass/RectPassElement.hpp>
 #include <hyprland/src/render/pass/BorderPassElement.hpp>
@@ -24,6 +30,13 @@
 #include <hyprland/src/render/decorations/DecorationPositioner.hpp>
 #include <hyprutils/utils/ScopeGuard.hpp>
 #undef private
+#undef protected
+
+// 0.55: SRenderModifData and RENDER_PASS_ALL moved into the Render::
+// namespace; g_pHyprOpenGL now lives in Render::GL::. Pull both in here.
+using namespace Render;
+using namespace Render::GL;
+
 #include "OverviewPassElement.hpp"
 #include "OverviewRender.hpp"
 
@@ -62,7 +75,7 @@ struct SHyprbarButtonMirror {
     CHyprColor   bgcol   = CHyprColor(0, 0, 0, 0);
     float        size    = 10.F;
     std::string  icon    = "";
-    SP<CTexture> iconTex = makeShared<CTexture>();
+    SP<ITexture> iconTex = makeShared<CGLTexture>(); // 0.55: CTexture split into ITexture iface + CGLTexture impl
 };
 
 struct SHyprbarGlobalStateMirror {
@@ -368,7 +381,7 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
             previousButtonSizes.push_back(button.size);
             button.size *= metrics.renderScale;
             if (button.iconTex && button.iconTex->m_texID != 0)
-                button.iconTex->destroyTexture();
+                button.iconTex.reset(); // 0.55: ITexture::destroyTexture() is gone; resetting the SP is the supported way to drop the GPU resource (the destructor handles GL cleanup).
         }
     }
 
@@ -400,7 +413,7 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
             for (size_t i = 0; i < previousButtonSizes.size() && i < HYPRBARGLOBALSTATE->buttons.size(); ++i) {
                 HYPRBARGLOBALSTATE->buttons[i].size = previousButtonSizes[i];
                 if (HYPRBARGLOBALSTATE->buttons[i].iconTex && HYPRBARGLOBALSTATE->buttons[i].iconTex->m_texID != 0)
-                    HYPRBARGLOBALSTATE->buttons[i].iconTex->destroyTexture();
+                    HYPRBARGLOBALSTATE->buttons[i].iconTex.reset(); // 0.55: ITexture::destroyTexture() is gone; resetting the SP is the supported way to drop the GPU resource (the destructor handles GL cleanup).
             }
         }
         return;
@@ -441,7 +454,7 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
             for (size_t i = 0; i < previousButtonSizes.size() && i < HYPRBARGLOBALSTATE->buttons.size(); ++i) {
                 HYPRBARGLOBALSTATE->buttons[i].size = previousButtonSizes[i];
                 if (HYPRBARGLOBALSTATE->buttons[i].iconTex && HYPRBARGLOBALSTATE->buttons[i].iconTex->m_texID != 0)
-                    HYPRBARGLOBALSTATE->buttons[i].iconTex->destroyTexture();
+                    HYPRBARGLOBALSTATE->buttons[i].iconTex.reset(); // 0.55: ITexture::destroyTexture() is gone; resetting the SP is the supported way to drop the GPU resource (the destructor handles GL cleanup).
             }
         }
     });
@@ -454,7 +467,9 @@ static void renderOverviewWindowShadow(PHLMONITOR monitor, const PHLWINDOW& wind
     static auto PSHADOWS            = CConfigValue<Hyprlang::INT>("decoration:shadow:enabled");
     static auto PSHADOWSIZE         = CConfigValue<Hyprlang::INT>("decoration:shadow:range");
     static auto PSHADOWSHARP        = CConfigValue<Hyprlang::INT>("decoration:shadow:sharp");
-    static auto PSHADOWIGNOREWINDOW = CConfigValue<Hyprlang::INT>("decoration:shadow:ignore_window");
+    // 0.55: decoration:shadow:ignore_window was removed; constructing a
+    // CConfigValue<> on an unknown key leaves its m_p null and any deref
+    // segfaults. We hardcode this to the Hyprland 0.54 default (true).
     static auto PSHADOWSCALE        = CConfigValue<Hyprlang::FLOAT>("decoration:shadow:scale");
     static auto PSHADOWOFFSET       = CConfigValue<Hyprlang::VEC2>("decoration:shadow:offset");
     static auto PSHADOWCOL          = CConfigValue<Hyprlang::INT>("decoration:shadow:color");
@@ -494,7 +509,7 @@ static void renderOverviewWindowShadow(PHLMONITOR monitor, const PHLWINDOW& wind
     data.range         = rangePx;
     data.color         = shadowColor;
     data.alpha         = metrics.targetOpacity;
-    data.ignoreWindow  = *PSHADOWIGNOREWINDOW;
+    data.ignoreWindow  = true; // 0.55: decoration:shadow:ignore_window key was removed; matches the previous Hyprland default.
     data.sharp         = *PSHADOWSHARP;
     g_pHyprRenderer->m_renderPass.add(makeUnique<COverviewShadowPassElement>(data));
 }
@@ -506,10 +521,17 @@ static void renderOverviewWindowBorder(PHLMONITOR monitor, const PHLWINDOW& wind
     if (metrics.borderSize <= 0.F)
         return;
 
-    static auto PACTIVECOL   = CConfigValue<Hyprlang::CUSTOMTYPE>("general:col.active_border");
-    static auto PINACTIVECOL = CConfigValue<Hyprlang::CUSTOMTYPE>("general:col.inactive_border");
-    auto* const ACTIVECOL    = reinterpret_cast<CGradientValueData*>((PACTIVECOL.ptr())->getData());
-    auto* const INACTIVECOL  = reinterpret_cast<CGradientValueData*>((PINACTIVECOL.ptr())->getData());
+    // 0.55: complex/custom-type config values now go through the
+    // IComplexConfigValue specialization of CConfigValue (m_hlangp path
+    // instead of the legacy m_p). The generic Hyprlang::CUSTOMTYPE
+    // template's ptr() reads m_p only, so it segfaults on null when the
+    // value lives on the Hyprlang side. Hyprland's own CGradientValue /
+    // CCssGapValue switched to CConfigValue<Config::IComplexConfigValue>
+    // for this exact reason.
+    static auto PACTIVECOL   = CConfigValue<Config::IComplexConfigValue>("general:col.active_border");
+    static auto PINACTIVECOL = CConfigValue<Config::IComplexConfigValue>("general:col.inactive_border");
+    auto* const ACTIVECOL    = sc<Config::CGradientValueData*>(PACTIVECOL.ptr());
+    auto* const INACTIVECOL  = sc<Config::CGradientValueData*>(PINACTIVECOL.ptr());
 
     const auto& grad             = selected ? window->m_ruleApplicator->activeBorderColor().valueOr(*ACTIVECOL) : window->m_ruleApplicator->inactiveBorderColor().valueOr(*INACTIVECOL);
 
@@ -540,18 +562,21 @@ static void renderOverviewGroupTabIndicators(PHLMONITOR monitor, const PHLWINDOW
     static auto PROUNDINGPOWER          = CConfigValue<Hyprlang::FLOAT>("group:groupbar:rounding_power");
     static auto POUTERGAP               = CConfigValue<Hyprlang::INT>("group:groupbar:gaps_out");
     static auto PINNERGAP               = CConfigValue<Hyprlang::INT>("group:groupbar:gaps_in");
-    static auto PGROUPCOLACTIVE         = CConfigValue<Hyprlang::CUSTOMTYPE>("group:groupbar:col.active");
-    static auto PGROUPCOLINACTIVE       = CConfigValue<Hyprlang::CUSTOMTYPE>("group:groupbar:col.inactive");
-    static auto PGROUPCOLACTIVELOCKED   = CConfigValue<Hyprlang::CUSTOMTYPE>("group:groupbar:col.locked_active");
-    static auto PGROUPCOLINACTIVELOCKED = CConfigValue<Hyprlang::CUSTOMTYPE>("group:groupbar:col.locked_inactive");
+    // 0.55: see comment on the border-color reads above — gradient
+    // CUSTOMTYPE config values must come through the IComplexConfigValue
+    // specialization or .ptr() segfaults.
+    static auto PGROUPCOLACTIVE         = CConfigValue<Config::IComplexConfigValue>("group:groupbar:col.active");
+    static auto PGROUPCOLINACTIVE       = CConfigValue<Config::IComplexConfigValue>("group:groupbar:col.inactive");
+    static auto PGROUPCOLACTIVELOCKED   = CConfigValue<Config::IComplexConfigValue>("group:groupbar:col.locked_active");
+    static auto PGROUPCOLINACTIVELOCKED = CConfigValue<Config::IComplexConfigValue>("group:groupbar:col.locked_inactive");
 
     if (*PINDICATORHEIGHT <= 0)
         return;
 
-    auto* const GROUPCOLACTIVE         = sc<CGradientValueData*>((PGROUPCOLACTIVE.ptr())->getData());
-    auto* const GROUPCOLINACTIVE       = sc<CGradientValueData*>((PGROUPCOLINACTIVE.ptr())->getData());
-    auto* const GROUPCOLACTIVELOCKED   = sc<CGradientValueData*>((PGROUPCOLACTIVELOCKED.ptr())->getData());
-    auto* const GROUPCOLINACTIVELOCKED = sc<CGradientValueData*>((PGROUPCOLINACTIVELOCKED.ptr())->getData());
+    auto* const GROUPCOLACTIVE         = sc<Config::CGradientValueData*>(PGROUPCOLACTIVE.ptr());
+    auto* const GROUPCOLINACTIVE       = sc<Config::CGradientValueData*>(PGROUPCOLINACTIVE.ptr());
+    auto* const GROUPCOLACTIVELOCKED   = sc<Config::CGradientValueData*>(PGROUPCOLACTIVELOCKED.ptr());
+    auto* const GROUPCOLINACTIVELOCKED = sc<Config::CGradientValueData*>(PGROUPCOLINACTIVELOCKED.ptr());
 
     const bool  groupLocked  = window->m_group->locked() || g_pKeybindManager->m_groupsLocked;
     const auto* colActive    = groupLocked ? GROUPCOLACTIVELOCKED : GROUPCOLACTIVE;
@@ -721,28 +746,129 @@ void renderOverviewWindow(const SRenderParams& params) {
     if (shouldBlurBg) {
         OverviewRender::flushPass(params.monitor);
 
-        const float blurAlpha     = std::sqrt(params.window->m_alpha->value());
+        // 0.55: window->m_alpha is now CMultiAVarContainer (multiple alpha
+        // sources combined). Use getTotal() for the combined value.
+        const float blurAlpha     = std::sqrt(params.window->m_alpha.getTotal());
         const int   blurRounding  = fullscreen ? 0 : sc<int>(std::round(getHyprlandDecorationRounding() * metrics.pxScale));
         const float roundingPower = fullscreen ? 2.F : getHyprlandDecorationRoundingPower();
         OverviewRender::renderBlur(params.monitor, params.windowBox, blurRounding, roundingPower, blurAlpha,
                                    params.usePrecomputedBlur || params.window->m_ruleApplicator->xray().valueOr(false));
     }
 
-    SRenderModifData modif;
-    modif.modifs.emplace_back(SRenderModifData::RMOD_TYPE_SCALE, params.renderScale);
-    modif.modifs.emplace_back(SRenderModifData::RMOD_TYPE_TRANSLATE, params.windowBox.pos());
-
     std::vector<SSurfaceOpacityOverride> surfaceOpacityOverrides;
     surfaceOpacityOverrides.reserve(4);
     overrideWindowSurfaceOpacity(params.window, surfaceOpacityOverrides, metrics.targetOpacity);
     auto restoreSurfaceOpacities = Hyprutils::Utils::CScopeGuard([&surfaceOpacityOverrides] { restoreSurfaceOpacityOverrides(surfaceOpacityOverrides); });
 
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{.renderModif = modif}));
+    // 0.55 fix: do NOT use renderModif TRANSLATE here. In Hyprland 0.55,
+    // CSurfacePassElement::visibleRegion (SurfacePassElement.cpp:174) builds
+    // the GL scissor from m_data.pos + m_data.localPos (pre-renderModif
+    // position), while renderTextureInternal (OpenGL.cpp:1455-1456) applies
+    // renderModif to the geometry box. Result: a renderModif TRANSLATE shifts
+    // the rendered geometry but NOT the scissor — the right-half-of-monitor
+    // workspace card windows render at e.g. x=1933 but get scissored to
+    // (0..pre-translate-width). Verified by reading the Hyprland 0.55 source
+    // tree at /home/itsjustdroid/Documents/GitHub/Hyprland.
+    //
+    // Workaround: instead of using renderModif, mutate each queued
+    // CSurfacePassElement directly:
+    //   - localPos += windowBox.pos() in logical (so getTexBox/visibleRegion
+    //     produce post-translate coordinates and the scissor matches).
+    //   - w/h pre-scaled by renderScale (since we no longer apply SCALE via
+    //     renderModif).
+    // No renderModif means no geometry/scissor mismatch.
     const auto firstWindowPassElement = g_pHyprRenderer->m_renderPass.m_passElements.size();
+
     g_pHyprRenderer->renderWindow(params.window, params.monitor, params.now, true, RENDER_PASS_ALL, true, true);
+
+    // Apply SCALE + TRANSLATE directly on each queued surface pass element
+    // (replaces what renderModif used to do, but in a way that keeps the
+    // scissor / geometry in the same coordinate space — see comment above).
+    // Logical coordinate = physical / monitor.m_scale; getTexBox internally
+    // multiplies pos+localPos by monitor.m_scale at drawSurface, so we add
+    // logical here.
+    //
+    // For sub-surfaces, the existing localPos is the offset INSIDE the
+    // parent. When the parent shrinks (w *= s, h *= s) that intra-window
+    // offset has to shrink too, otherwise sub-surfaces float outside the
+    // scaled parent box. Scale the existing localPos by s before adding
+    // the workspace-card translation. The main surface's localPos is 0
+    // (renderWindow with ignorePosition=true), so the scale is a no-op
+    // for it.
+    {
+        const Vector2D translateLogical = params.windowBox.pos() / params.monitor->m_scale;
+        const float    s                = params.renderScale;
+        auto&          passElements     = g_pHyprRenderer->m_renderPass.m_passElements;
+        for (size_t i = firstWindowPassElement; i < passElements.size(); ++i) {
+            const auto& pe = passElements[i];
+            if (!pe || !pe->element)
+                continue;
+            auto* sfp = dynamic_cast<CSurfacePassElement*>(pe->element.get());
+            if (!sfp)
+                continue;
+
+            // Approach: let CSurfacePassElement::getTexBox compute the natural
+            // (pre-overview-scale) tex box first — this respects all of
+            // Hyprland's surface logic (small/viewport-corrected surfaces,
+            // subsurfaces using m_current.size, mainSurface vs not, etc.).
+            // Then override the cached result with our scaled + translated
+            // version. Because m_texBoxCached short-circuits getTexBox, every
+            // future call (visibleRegion's getTexBox, drawSurface's
+            // getTexBox, etc.) returns our scaled box without re-running
+            // the conditional logic that would reset width to SIZE.x for
+            // small surfaces (zen-browser-style) or to SURFSIZE for
+            // subsurfaces. Position is the natural box's pos scaled by s
+            // around origin then translated by translateLogical — which
+            // mirrors what an RMOD_TYPE_SCALE+TRANSLATE renderModif would
+            // have produced, but baked into the box itself so the geometry
+            // and the scissor (built from the same getTexBox in
+            // visibleRegion) stay in lockstep.
+            const auto naturalTexBox = sfp->getTexBox(); // populates m_cachedTexBox / m_texBoxCached
+            sfp->m_cachedTexBox      = CBox{
+                naturalTexBox.x * s + translateLogical.x,
+                naturalTexBox.y * s + translateLogical.y,
+                naturalTexBox.width * s,
+                naturalTexBox.height * s,
+            };
+
+            // visibleRegion (SurfacePassElement.cpp:174) translates the
+            // scissor by `(m_data.pos + m_data.localPos - m_data.pMonitor->m_position) * monitor.scale`.
+            // For the scissor to land on the same physical position as our
+            // overridden cachedTexBox, m_data.localPos must equal the
+            // cached box's logical position (since m_data.pos and the
+            // monitor offset cancel for ignorePosition=true rendering).
+            sfp->m_data.localPos = sfp->m_data.localPos * s + translateLogical;
+
+            // squishOversized's `localPos.x > 0` clamp in getTexBox is
+            // dormant now that the cache short-circuits the function, but
+            // setting this false is cheap insurance against any other
+            // squishOversized-gated logic that might fire downstream.
+            sfp->m_data.squishOversized = false;
+
+            // 0.55 fix: bypass the UV-crop path in
+            // IElementRenderer::calculateUVForSurface
+            // (ElementRenderer.cpp:106-109). When projSize < EXPECTED_SIZE
+            // (which is exactly our case — we scaled projSize by s but
+            // getSurfaceExpectedSize returns the window's reported native
+            // size), the renderer assumes the surface texture is bigger
+            // than the viewport and shrinks uvBR by the ratio. Result:
+            // only the top-left quarter (s*s) of the texture gets sampled
+            // into our scaled box, producing a "zoom-in / crop" effect on
+            // every overview window. The early-out at line 105
+            //     const auto SHOULD_SKIP = !pWindow || pWindow->m_animatingIn;
+            // covers our case: with pWindow nulled, SHOULD_SKIP is true,
+            // the UV adjustment is skipped, and UV stays at (0,0)..(1,1)
+            // so the full texture downsamples into the scaled box. Other
+            // pWindow uses in drawSurface degrade gracefully (no
+            // window-opaque blend optimisation, no interactive-resize
+            // alignment fix-ups) — visual correctness is the priority
+            // here.
+            sfp->m_data.pWindow = nullptr;
+        }
+    }
+
     if (!fullscreen)
         roundStandaloneWindowPassElements(params.window, params.monitor, params.renderScale, firstWindowPassElement);
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{.renderModif = SRenderModifData{}}));
 
     renderOverviewCustomDecorations(params.monitor, params.window, params.workspaceBox ? *params.workspaceBox : CBox{}, params.windowBox, metrics, DECORATION_LAYER_OVER);
     renderOverviewCustomDecorations(params.monitor, params.window, params.workspaceBox ? *params.workspaceBox : CBox{}, params.windowBox, metrics, DECORATION_LAYER_OVERLAY);
