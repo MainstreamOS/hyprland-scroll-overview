@@ -17,6 +17,16 @@
 #include <hyprutils/string/ConstVarList.hpp>
 using namespace Hyprutils::String;
 
+// Lua C API headers — extern "C" so name-mangling stays C-style. Used by
+// luaOverviewDispatcher (the addLuaFunction wrapper exposed in Lua mode for
+// the scrolloverview:overview dispatcher; plugin dispatchers with colons in
+// their name can't be invoked from `hl.dispatch` so a Lua-callable wrapper
+// is required for keybind/Quickshell access in 0.55+).
+extern "C" {
+#include <lua.h>
+#include <lauxlib.h>
+}
+
 #include "globals.hpp"
 #include "scrollOverview.hpp"
 #include "OverviewGesture.hpp"
@@ -326,6 +336,29 @@ static Hyprlang::CParseResult overviewGestureKeyword(const char* LHS, const char
     return result;
 }
 
+// Lua-callable wrapper around onOverviewDispatcher.
+//
+// In Lua mode, plugin dispatchers registered via addDispatcherV2 land in
+// the C++ m_dispatchers map but are NOT exposed as Lua callables — and
+// `hl.dispatch` only accepts hl.dsp.* userdata or Lua functions, never a
+// string name. Plus the colon in "scrolloverview:overview" makes hyprctl's
+// Lua-wrap (`return hl.dispatch(scrolloverview:overview ...)`) fail at the
+// parser before we ever reach a callable.
+//
+// addLuaFunction registers this wrapper under hl.plugin.scrolloverview.overview,
+// reachable from Lua as e.g.:
+//   hl.bind("SUPER + O", function() hl.plugin.scrolloverview.overview("toggle") end)
+// or from outside Hyprland via:
+//   hyprctl eval 'hl.plugin.scrolloverview.overview("on")'
+//
+// The dispatcher accepts the same arg strings as the C++ dispatcher
+// ("toggle", "select", "off"/"close"/"disable", or default = open).
+static int luaOverviewDispatcher(lua_State* L) {
+    const char* arg = luaL_optstring(L, 1, "toggle");
+    ::onOverviewDispatcher(std::string(arg));
+    return 0;
+}
+
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     SCROLLOVERVIEW_HANDLE = handle;
 
@@ -384,27 +417,68 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     HyprlandAPI::addDispatcherV2(SCROLLOVERVIEW_HANDLE, "scrolloverview:overview", ::onOverviewDispatcher);
 
-    HyprlandAPI::addConfigKeyword(SCROLLOVERVIEW_HANDLE, "scrolloverview-gesture", ::overviewGestureKeyword, {});
+    // Lua-mode exposure for the overview dispatcher (see luaOverviewDispatcher
+    // comment above). addLuaFunction is no-op outside Lua mode (PluginAPI.cpp:470).
+    if (Config::mgr()->type() == Config::CONFIG_LUA)
+        HyprlandAPI::addLuaFunction(SCROLLOVERVIEW_HANDLE, "scrolloverview", "overview", ::luaOverviewDispatcher);
 
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:gesture_distance", Hyprlang::INT{200});
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:scale", Hyprlang::FLOAT{0.5F});
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:workspace_gap", Hyprlang::INT{100});
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:wallpaper", Hyprlang::INT{0});
+    // scrolloverview-gesture is only usable in Legacy mode (addConfigKeyword
+    // is gated on CONFIG_LEGACY in PluginAPI.cpp:198). Skipping it under Lua
+    // costs nothing since none of the dots-hyprland configs use it; users on
+    // pure-hyprlang setups still get the keyword.
+    if (Config::mgr()->type() == Config::CONFIG_LEGACY)
+        HyprlandAPI::addConfigKeyword(SCROLLOVERVIEW_HANDLE, "scrolloverview-gesture", ::overviewGestureKeyword, {});
+
+    // V2 config registration. addConfigValue (V1) is a no-op when Hyprland
+    // runs the Lua config manager (PluginAPI.cpp:179 gates on CONFIG_LEGACY),
+    // so we use addConfigValueV2 + IValue subclasses to register through the
+    // manager-agnostic path. The scrolloverview-gesture custom keyword was
+    // dropped — it wasn't referenced by any shipped config and the V1
+    // addConfigKeyword is also Legacy-only.
+    g_pSOConfig = makeUnique<SScrollOverviewConfig>();
+
+    g_pSOConfig->gestureDistance =
+        makeShared<Config::Values::CIntValue>("plugin:scrolloverview:gesture_distance", "Pixel distance treated as the gesture max", 200);
+    g_pSOConfig->scale =
+        makeShared<Config::Values::CFloatValue>("plugin:scrolloverview:scale", "Overview workspace zoom factor", 0.5F);
+    g_pSOConfig->workspaceGap =
+        makeShared<Config::Values::CIntValue>("plugin:scrolloverview:workspace_gap", "Pixel gap between workspaces in overview", 100);
+    g_pSOConfig->wallpaperMode =
+        makeShared<Config::Values::CIntValue>("plugin:scrolloverview:wallpaper", "0 global only, 1 per-workspace only, 2 both", 0);
     // Optional path to an image file used as the global wallpaper. When set,
     // the backdrop is rendered from this file instead of by iterating
     // ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND surfaces. Useful for setups
     // (end-4 / Quickshell-painted) where the wlr-layer-shell wallpaper
     // surface texture isn't stable to capture mid-render.
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:wallpaper_path", Hyprlang::STRING{""});
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:blur", Hyprlang::INT{0});
+    g_pSOConfig->wallpaperPath =
+        makeShared<Config::Values::CStringValue>("plugin:scrolloverview:wallpaper_path", "Path to a static image to use as the overview backdrop", "");
+    g_pSOConfig->blur =
+        makeShared<Config::Values::CIntValue>("plugin:scrolloverview:blur", "Blur the global overview wallpaper", 0);
     // Open and close speeds are both hardcoded in scrollOverview.cpp;
     // the bezier is also fixed (cubic ease-in-out). No user-facing
     // config to tune the open/close animation.
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:shadow:enabled", Hyprlang::INT{0});
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:shadow:range", Hyprlang::INT{-1});
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:shadow:render_power", Hyprlang::INT{-1});
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:shadow:ignore_window", Hyprlang::INT{-1});
-    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:shadow:color", Hyprlang::INT{-1});
+    g_pSOConfig->shadowEnabled =
+        makeShared<Config::Values::CIntValue>("plugin:scrolloverview:shadow:enabled", "Render shadows behind overview windows", 0);
+    g_pSOConfig->shadowRange =
+        makeShared<Config::Values::CIntValue>("plugin:scrolloverview:shadow:range", "Overview shadow range, -1 inherits decoration:shadow:range", -1);
+    g_pSOConfig->shadowRenderPower =
+        makeShared<Config::Values::CIntValue>("plugin:scrolloverview:shadow:render_power", "Overview shadow render power, -1 inherits", -1);
+    g_pSOConfig->shadowIgnoreWindow =
+        makeShared<Config::Values::CIntValue>("plugin:scrolloverview:shadow:ignore_window", "Overview shadow ignore window, -1 inherits", -1);
+    g_pSOConfig->shadowColor =
+        makeShared<Config::Values::CIntValue>("plugin:scrolloverview:shadow:color", "Overview shadow color, -1 inherits decoration:shadow:color", -1);
+
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->gestureDistance);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->scale);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->workspaceGap);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->wallpaperMode);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->wallpaperPath);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->blur);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->shadowEnabled);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->shadowRange);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->shadowRenderPower);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->shadowIgnoreWindow);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_pSOConfig->shadowColor);
 
     HyprlandAPI::reloadConfig();
 
@@ -417,6 +491,12 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_unloading = true;
     g_pScrollOverview.reset();
     disableScrollOverviewHooks();
+
+    // Drop the V2 IValue ownership. addConfigValueV2 also keeps a weak
+    // reference inside m_registeredApiValues that Hyprland clears on
+    // plugin unload, but releasing our SPs is what actually triggers
+    // destruction of the value objects.
+    g_pSOConfig.reset();
 
     HyprlandAPI::reloadConfig(); // 0.55: g_pConfigManager removed; HyprlandAPI exposes the reload entry point. We need to reload now to clear all the gestures.
 }

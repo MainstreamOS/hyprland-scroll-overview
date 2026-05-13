@@ -44,18 +44,18 @@ namespace OverviewWindow {
 namespace {
 
 static bool getHyprlandBlurNewOptimizations() {
-    static auto* const* PNEWOPTIMIZATIONS = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:blur:new_optimizations")->getDataStaticPtr();
-    return **PNEWOPTIMIZATIONS;
+    static const auto* const PNEWOPTIMIZATIONS = soConfigPtr<Hyprlang::INT>("decoration:blur:new_optimizations");
+    return *PNEWOPTIMIZATIONS;
 }
 
 static int getHyprlandDecorationRounding() {
-    static auto* const* PROUNDING = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:rounding")->getDataStaticPtr();
-    return std::max<int>(0, **PROUNDING);
+    static const auto* const PROUNDING = soConfigPtr<Hyprlang::INT>("decoration:rounding");
+    return std::max<int>(0, *PROUNDING);
 }
 
 static float getHyprlandDecorationRoundingPower() {
-    static auto* const* PROUNDINGPOWER = (Hyprlang::FLOAT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:rounding_power")->getDataStaticPtr();
-    return **PROUNDINGPOWER;
+    static const auto* const PROUNDINGPOWER = soConfigPtr<Hyprlang::FLOAT>("decoration:rounding_power");
+    return *PROUNDINGPOWER;
 }
 
 struct SSurfaceOpacityOverride {
@@ -183,13 +183,13 @@ static float getOverviewWindowTargetOpacity(const PHLWINDOW& window) {
     if (!window)
         return 1.F;
 
-    static auto* const* PACTIVEOPACITY     = (Hyprlang::FLOAT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:active_opacity")->getDataStaticPtr();
-    static auto* const* PINACTIVEOPACITY   = (Hyprlang::FLOAT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:inactive_opacity")->getDataStaticPtr();
-    static auto* const* PFULLSCREENOPACITY = (Hyprlang::FLOAT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:fullscreen_opacity")->getDataStaticPtr();
+    static const auto* const PACTIVEOPACITY     = soConfigPtr<Hyprlang::FLOAT>("decoration:active_opacity");
+    static const auto* const PINACTIVEOPACITY   = soConfigPtr<Hyprlang::FLOAT>("decoration:inactive_opacity");
+    static const auto* const PFULLSCREENOPACITY = soConfigPtr<Hyprlang::FLOAT>("decoration:fullscreen_opacity");
 
     const bool  fullscreen     = window->isFullscreen();
     const bool  active         = Desktop::focusState()->window() == window;
-    float       targetOpacity  = fullscreen ? **PFULLSCREENOPACITY : active ? **PACTIVEOPACITY : **PINACTIVEOPACITY;
+    float       targetOpacity  = fullscreen ? *PFULLSCREENOPACITY : active ? *PACTIVEOPACITY : *PINACTIVEOPACITY;
     const auto& ruleOpacityVar = fullscreen ? window->m_ruleApplicator->alphaFullscreen() : active ? window->m_ruleApplicator->alpha() : window->m_ruleApplicator->alphaInactive();
 
     targetOpacity = ruleOpacityVar.valueOr(Desktop::Types::SAlphaValue{}).applyAlpha(targetOpacity);

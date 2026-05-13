@@ -153,14 +153,14 @@ std::vector<UP<IPassElement>> COverviewShadowPassElement::draw() {
     auto color = data.color;
     color.a *= data.alpha;
 
-    static auto* const* PGLOBALRENDERPOWER = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, "decoration:shadow:render_power")->getDataStaticPtr();
+    static const auto PGLOBALRENDERPOWER = soConfigPtr<Hyprlang::INT>("decoration:shadow:render_power");
 
-    const auto PREVRENDERPOWER = data.renderPower > 0 ? std::optional<int>(**PGLOBALRENDERPOWER) : std::nullopt;
+    const auto PREVRENDERPOWER = data.renderPower > 0 ? std::optional<int>(*PGLOBALRENDERPOWER) : std::nullopt;
     if (data.renderPower > 0)
-        **PGLOBALRENDERPOWER = data.renderPower;
+        *PGLOBALRENDERPOWER = data.renderPower;
     auto restoreRenderPower = Hyprutils::Utils::CScopeGuard([PREVRENDERPOWER] {
         if (PREVRENDERPOWER)
-            **PGLOBALRENDERPOWER = *PREVRENDERPOWER;
+            *PGLOBALRENDERPOWER = *PREVRENDERPOWER;
     });
 
     if (data.sharp)
