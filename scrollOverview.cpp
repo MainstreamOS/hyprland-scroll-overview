@@ -120,6 +120,11 @@ static bool isTopLayerFocused(PHLMONITOR monitor) {
 
 static constexpr const char* OVERVIEW_INSERT_FADE_BEZIER = "scrolloverviewWorkspaceInsertFade";
 static constexpr const char* OVERVIEW_REMOVE_FADE_BEZIER = "scrolloverviewWorkspaceRemoveFade";
+// Dedicated open/close zoom on `scale`: a slower open lets the cubic
+// ease-in-out breathe; the close is snappier. Both speeds hardcoded (no knob).
+static constexpr const char* OVERVIEW_OPEN_BEZIER  = "scrolloverviewOpen";
+static constexpr float       OVERVIEW_OPEN_SPEED   = 8.0F;
+static constexpr float       OVERVIEW_CLOSE_SPEED  = 4.0F;
 
 static bool isPointerOnTopLayer(PHLMONITOR monitor) {
     if (!monitor)
@@ -803,6 +808,13 @@ CScrollOverview::~CScrollOverview() {
 }
 
 CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_) : startedOn(startedOn_), swipe(swipe_) {
+    // Notify external listeners (e.g. Quickshell) that the overview is opening
+    // so they can adjust shell-wide state — used by dots-hyprland to clear fake
+    // screen rounding for clean overview corners (restored on close).
+    // Observable in QML via Hyprland.onRawEvent.
+    if (g_pEventManager)
+        g_pEventManager->postEvent(SHyprIPCEvent{.event = "scrolloverview", .data = "open"});
+
     const auto          PMONITOR = Desktop::focusState()->monitor();
     pMonitor                     = PMONITOR;
 
@@ -835,7 +847,27 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_) : started
     workspaceRemoveFadeConfig->internalStyle   = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalStyle : "";
     workspaceRemoveFadeConfig->pValues         = workspaceRemoveFadeConfig;
 
-    g_pAnimationManager->createAnimation(1.F, scale, WINDOWSMOVECONFIG, AVARDAMAGE_NONE);
+    // Dedicated open/close zoom for `scale` — cubic ease-in-out {0.65,0},{0.35,1}.
+    if (!g_pAnimationManager->bezierExists(OVERVIEW_OPEN_BEZIER))
+        g_pAnimationManager->addBezierWithName(OVERVIEW_OPEN_BEZIER, Vector2D{0.65, 0.0}, Vector2D{0.35, 1.0});
+
+    overviewOpenConfig                  = makeShared<Hyprutils::Animation::SAnimationPropertyConfig>();
+    overviewOpenConfig->overridden      = true;
+    overviewOpenConfig->internalBezier  = OVERVIEW_OPEN_BEZIER;
+    overviewOpenConfig->internalSpeed   = OVERVIEW_OPEN_SPEED;
+    overviewOpenConfig->internalEnabled = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalEnabled : 1;
+    overviewOpenConfig->internalStyle   = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalStyle : "";
+    overviewOpenConfig->pValues         = overviewOpenConfig;
+
+    overviewCloseConfig                  = makeShared<Hyprutils::Animation::SAnimationPropertyConfig>();
+    overviewCloseConfig->overridden      = true;
+    overviewCloseConfig->internalBezier  = OVERVIEW_OPEN_BEZIER;
+    overviewCloseConfig->internalSpeed   = OVERVIEW_CLOSE_SPEED;
+    overviewCloseConfig->internalEnabled = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalEnabled : 1;
+    overviewCloseConfig->internalStyle   = WINDOWSMOVEVALUES ? WINDOWSMOVEVALUES->internalStyle : "";
+    overviewCloseConfig->pValues         = overviewCloseConfig;
+
+    g_pAnimationManager->createAnimation(1.F, scale, overviewOpenConfig, AVARDAMAGE_NONE);
     g_pAnimationManager->createAnimation({}, viewOffset, WINDOWSMOVECONFIG, AVARDAMAGE_NONE);
     g_pAnimationManager->createAnimation(1.F, workspaceInsertProgress, WINDOWSMOVECONFIG, AVARDAMAGE_NONE);
     g_pAnimationManager->createAnimation(1.F, workspaceInsertFadeProgress, workspaceInsertFadeConfig, AVARDAMAGE_NONE);
@@ -3145,8 +3177,13 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
         if (layerOwner->m_monitor != MONITOR)
             return true;
 
+        // Let Top/Overlay layer damage propagate so animating overlay UI
+        // (hot-corner ripple, hover effects, notification toasts) keeps
+        // repainting while the overview is open instead of freezing on its
+        // last pre-open frame. These render above the overview, not through
+        // its blur backdrop, so propagating their damage is safe.
         if (layerOwner->m_layer > ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM)
-            return false;
+            return true;
 
         markBlurDirty();
         if (layerOwner->m_layer == ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND)
@@ -3210,6 +3247,19 @@ void CScrollOverview::close() {
     closing = true;
     inputFramePending = false;
     restoreWorkspaceAnimationOverrides();
+
+    // Pair with the "scrolloverview>>open" event from the constructor — fired
+    // at the start of the close animation so shell-wide listeners (e.g.
+    // dots-hyprland's fake screen rounding restore) react in time to feel
+    // synchronous with the visible close.
+    if (g_pEventManager)
+        g_pEventManager->postEvent(SHyprIPCEvent{.event = "scrolloverview", .data = "close"});
+
+    // Rebind `scale` to the close config so the *scale=1.0 write later in
+    // close() animates with the snappier close speed instead of the slow open
+    // config bound at construction.
+    if (scale && overviewCloseConfig)
+        scale->setConfig(overviewCloseConfig);
 
     const auto SELECTEDWORKSPACE =
         viewportCurrentWorkspace < images.size() && images[viewportCurrentWorkspace] ? images[viewportCurrentWorkspace]->pWorkspace : PHLWORKSPACE{};
@@ -3453,6 +3503,17 @@ void CScrollOverview::render() {
     renderPinnedFloatingWindows(MONITOR, SCALE, NOW);
 
     for (auto const& ls : MONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_TOP]) {
+        if (!Desktop::View::validMapped(ls.lock()))
+            continue;
+
+        g_pHyprRenderer->renderLayer(ls.lock(), MONITOR, NOW);
+    }
+
+    // Overlay layer renders above Top — needed so Overlay-layer surfaces
+    // (e.g. dots-hyprland's hot-corner ripple) keep drawing over the active
+    // overview. render() fully replaces Hyprland's renderAllClientsForWorkspace
+    // path, which would otherwise draw this layer.
+    for (auto const& ls : MONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY]) {
         if (!Desktop::View::validMapped(ls.lock()))
             continue;
 

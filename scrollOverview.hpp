@@ -203,6 +203,13 @@ class CScrollOverview : public IOverview {
     PHLANIMVAR<float>                workspaceInsertFadeProgress;
     SP<Hyprutils::Animation::SAnimationPropertyConfig> workspaceInsertFadeConfig;
     SP<Hyprutils::Animation::SAnimationPropertyConfig> workspaceRemoveFadeConfig;
+    // Dedicated open/close zoom configs on `scale`. close() swaps `scale`'s
+    // active config to overviewCloseConfig before the close animation, so the
+    // open is slow (overviewOpenConfig) and the close fast. Kept as members
+    // because the animation manager holds only a weak ref — if the SP drops,
+    // the animation degenerates into an instant snap.
+    SP<Hyprutils::Animation::SAnimationPropertyConfig> overviewOpenConfig;
+    SP<Hyprutils::Animation::SAnimationPropertyConfig> overviewCloseConfig;
     Time::steady_tp                  lastRealtimePreviewFrame = {};
     Time::steady_tp                  realtimePreviewTimerDue = {};
     wl_event_source*                 realtimePreviewTimer = nullptr;
