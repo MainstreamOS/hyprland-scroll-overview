@@ -49,6 +49,15 @@
 #include <hyprland/src/render/pass/SurfacePassElement.hpp>
 #include <hyprland/src/render/pass/TexPassElement.hpp>
 #include <hyprland/src/render/types.hpp>
+#include <hyprland/src/render/Texture.hpp>
+#include <hyprland/src/render/gl/GLTexture.hpp>
+
+// Optional image-file backdrop (plugin:scrolloverview:wallpaper_path): load
+// arbitrary image formats via gdk-pixbuf into a cairo ARGB surface.
+#include <cairo/cairo.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
+#include <cstdint>
+#include <vector>
 #include <hyprland/src/render/decorations/CHyprGroupBarDecoration.hpp>
 #include <hyprland/src/render/decorations/DecorationPositioner.hpp>
 #include <hyprutils/utils/ScopeGuard.hpp>
@@ -1233,9 +1242,212 @@ void CScrollOverview::renderWallpaperLayers(PHLMONITOR monitor, const CBox& work
     renderOverviewLayerLevel(monitor, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, workspaceBox, renderScale, now, alpha);
 }
 
+// Separable box blur with a sliding-window running sum: O(W*H) per axis,
+// independent of radius. src and dst must be distinct H*stride BGRA8888
+// buffers; alpha is forced opaque. Three (H+V) iterations approximate a
+// Gaussian. Used to CPU-pre-blur the custom wallpaper backdrop because
+// Hyprland's GL blur produces noise against that texture.
+static void boxBlurHorizontal(const uint8_t* src, uint8_t* dst, int W, int H, int stride, int radius) {
+    if (radius < 1)
+        return;
+    const int divisor = 2 * radius + 1;
+    for (int y = 0; y < H; ++y) {
+        const uint8_t* srcRow = &src[y * stride];
+        uint8_t*       dstRow = &dst[y * stride];
+        int            sumB = 0, sumG = 0, sumR = 0;
+        for (int xi = -radius; xi <= radius; ++xi) {
+            const int sx = std::clamp(xi, 0, W - 1);
+            sumB += srcRow[sx * 4 + 0];
+            sumG += srcRow[sx * 4 + 1];
+            sumR += srcRow[sx * 4 + 2];
+        }
+        for (int x = 0; x < W; ++x) {
+            dstRow[x * 4 + 0] = (uint8_t)(sumB / divisor);
+            dstRow[x * 4 + 1] = (uint8_t)(sumG / divisor);
+            dstRow[x * 4 + 2] = (uint8_t)(sumR / divisor);
+            dstRow[x * 4 + 3] = 0xFF;
+            const int oldX = std::clamp(x - radius, 0, W - 1);
+            const int newX = std::clamp(x + radius + 1, 0, W - 1);
+            sumB += (int)srcRow[newX * 4 + 0] - (int)srcRow[oldX * 4 + 0];
+            sumG += (int)srcRow[newX * 4 + 1] - (int)srcRow[oldX * 4 + 1];
+            sumR += (int)srcRow[newX * 4 + 2] - (int)srcRow[oldX * 4 + 2];
+        }
+    }
+}
+
+static void boxBlurVertical(const uint8_t* src, uint8_t* dst, int W, int H, int stride, int radius) {
+    if (radius < 1)
+        return;
+    const int divisor = 2 * radius + 1;
+    for (int x = 0; x < W; ++x) {
+        int sumB = 0, sumG = 0, sumR = 0;
+        for (int yi = -radius; yi <= radius; ++yi) {
+            const int sy = std::clamp(yi, 0, H - 1);
+            sumB += src[sy * stride + x * 4 + 0];
+            sumG += src[sy * stride + x * 4 + 1];
+            sumR += src[sy * stride + x * 4 + 2];
+        }
+        for (int y = 0; y < H; ++y) {
+            dst[y * stride + x * 4 + 0] = (uint8_t)(sumB / divisor);
+            dst[y * stride + x * 4 + 1] = (uint8_t)(sumG / divisor);
+            dst[y * stride + x * 4 + 2] = (uint8_t)(sumR / divisor);
+            dst[y * stride + x * 4 + 3] = 0xFF;
+            const int oldY = std::clamp(y - radius, 0, H - 1);
+            const int newY = std::clamp(y + radius + 1, 0, H - 1);
+            sumB += (int)src[newY * stride + x * 4 + 0] - (int)src[oldY * stride + x * 4 + 0];
+            sumG += (int)src[newY * stride + x * 4 + 1] - (int)src[oldY * stride + x * 4 + 1];
+            sumR += (int)src[newY * stride + x * 4 + 2] - (int)src[oldY * stride + x * 4 + 2];
+        }
+    }
+}
+
 void CScrollOverview::renderGlobalWallpaper(PHLMONITOR monitor, const Time::steady_tp& now) {
     if (!monitor)
         return;
+
+    // Configurable image-file backdrop. When plugin:scrolloverview:wallpaper_path
+    // is set, source the global wallpaper from disk instead of from a
+    // wlr-layer-shell BACKGROUND surface. The layer-iteration path below is only
+    // reliable when a dedicated wallpaper daemon (hyprpaper, swww) exposes a
+    // stable surface texture; Quickshell/Qt-painted setups (dots-hyprland)
+    // produce transient buffers that read as garbage when sampled mid-render.
+    // Cached; reloaded only when the path changes.
+    //
+    // Blur is baked into a CPU-pre-blurred texture below rather than via
+    // Hyprland's GL blur (updateBackdropBlurCache -> blurFramebuffer), which
+    // produces GPU noise against this texture — render() routes custom
+    // wallpapers straight here and skips the GL blur cache.
+    const std::string CONFIGUREDPATH = ScrollOverview::Config::getWallpaperPath();
+    if (!CONFIGUREDPATH.empty()) {
+        const bool WANTBLUR = ScrollOverview::Config::getBlur();
+
+        if (m_lastLoadedWallpaperPath != CONFIGUREDPATH) {
+            m_customWallpaperTex.reset();
+            m_customWallpaperBlurredTex.reset();
+            m_lastLoadedWallpaperPath = CONFIGUREDPATH;
+        }
+
+        if (!m_customWallpaperTex || (WANTBLUR && !m_customWallpaperBlurredTex)) {
+            // gdk-pixbuf loads JPG/PNG/WebP/etc. into a CAIRO_FORMAT_ARGB32
+            // surface. Pixbuf is RGB[A] byte order; cairo on little-endian wants
+            // BGRA — swap during copy and force opaque alpha.
+            cairo_surface_t* SURF   = nullptr;
+            GError*          PIXERR = nullptr;
+            GdkPixbuf*       PIXBUF = gdk_pixbuf_new_from_file(CONFIGUREDPATH.c_str(), &PIXERR);
+            if (PIXERR)
+                g_error_free(PIXERR);
+            if (PIXBUF) {
+                const int     PW    = gdk_pixbuf_get_width(PIXBUF);
+                const int     PH    = gdk_pixbuf_get_height(PIXBUF);
+                const int     PCH   = gdk_pixbuf_get_n_channels(PIXBUF);
+                const int     PROW  = gdk_pixbuf_get_rowstride(PIXBUF);
+                const guchar* PDATA = gdk_pixbuf_read_pixels(PIXBUF);
+                if (PW > 0 && PH > 0 && PCH >= 3 && PDATA) {
+                    SURF = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, PW, PH);
+                    if (SURF && cairo_surface_status(SURF) == CAIRO_STATUS_SUCCESS) {
+                        cairo_surface_flush(SURF);
+                        const int CSTRIDE = cairo_image_surface_get_stride(SURF);
+                        uint8_t*  CPIXELS = cairo_image_surface_get_data(SURF);
+                        for (int y = 0; y < PH; ++y) {
+                            const guchar* srcRow = &PDATA[y * PROW];
+                            uint8_t*      dstRow = &CPIXELS[y * CSTRIDE];
+                            for (int x = 0; x < PW; ++x) {
+                                const guchar* sp = &srcRow[x * PCH];
+                                uint8_t*      dp = &dstRow[x * 4];
+                                dp[0] = sp[2];                 // B <- R
+                                dp[1] = sp[1];                 // G <- G
+                                dp[2] = sp[0];                 // R <- B
+                                dp[3] = (PCH == 4) ? sp[3] : 0xFF;
+                            }
+                        }
+                        cairo_surface_mark_dirty(SURF);
+                    }
+                }
+                g_object_unref(PIXBUF);
+            }
+            if (SURF && cairo_surface_status(SURF) == CAIRO_STATUS_SUCCESS) {
+                const int W      = cairo_image_surface_get_width(SURF);
+                const int H      = cairo_image_surface_get_height(SURF);
+                const int STRIDE = cairo_image_surface_get_stride(SURF);
+                uint8_t*  PIXELS = cairo_image_surface_get_data(SURF);
+                if (W > 0 && H > 0 && PIXELS) {
+                    if (!m_customWallpaperTex)
+                        m_customWallpaperTex = makeShared<Render::GL::CGLTexture>(DRM_FORMAT_XRGB8888, PIXELS, sc<uint32_t>(STRIDE), Vector2D{sc<double>(W), sc<double>(H)});
+
+                    // CPU pre-blur for blur=true: cairo bilinear downscale to
+                    // 1/4, three iterations of separable box blur (~Gaussian),
+                    // cairo bilinear upscale back. Runs once per path change.
+                    if (WANTBLUR && !m_customWallpaperBlurredTex) {
+                        const int     SMALL_W    = std::max(8, W / 4);
+                        const int     SMALL_H    = std::max(8, H / 4);
+                        constexpr int BOX_RADIUS = 8;
+                        constexpr int BOX_PASSES = 3;
+
+                        cairo_surface_t* SMALL   = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, SMALL_W, SMALL_H);
+                        cairo_t*         CRSMALL = cairo_create(SMALL);
+                        cairo_scale(CRSMALL, (double)SMALL_W / W, (double)SMALL_H / H);
+                        cairo_set_source_surface(CRSMALL, SURF, 0, 0);
+                        cairo_pattern_set_filter(cairo_get_source(CRSMALL), CAIRO_FILTER_BILINEAR);
+                        cairo_paint(CRSMALL);
+                        cairo_destroy(CRSMALL);
+
+                        cairo_surface_flush(SMALL);
+                        const int            SMALL_STRIDE = cairo_image_surface_get_stride(SMALL);
+                        uint8_t*             SMALL_PIXELS = cairo_image_surface_get_data(SMALL);
+                        std::vector<uint8_t> AUX(SMALL_H * SMALL_STRIDE, 0);
+                        for (int pass = 0; pass < BOX_PASSES; ++pass) {
+                            boxBlurHorizontal(SMALL_PIXELS, AUX.data(), SMALL_W, SMALL_H, SMALL_STRIDE, BOX_RADIUS);
+                            boxBlurVertical(AUX.data(), SMALL_PIXELS, SMALL_W, SMALL_H, SMALL_STRIDE, BOX_RADIUS);
+                        }
+                        cairo_surface_mark_dirty(SMALL);
+
+                        cairo_surface_t* BIG   = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, W, H);
+                        cairo_t*         CRBIG = cairo_create(BIG);
+                        cairo_scale(CRBIG, (double)W / SMALL_W, (double)H / SMALL_H);
+                        cairo_set_source_surface(CRBIG, SMALL, 0, 0);
+                        cairo_pattern_set_filter(cairo_get_source(CRBIG), CAIRO_FILTER_BILINEAR);
+                        cairo_paint(CRBIG);
+                        cairo_destroy(CRBIG);
+                        cairo_surface_destroy(SMALL);
+
+                        cairo_surface_flush(BIG);
+                        const int B_STRIDE = cairo_image_surface_get_stride(BIG);
+                        uint8_t*  B_PIXELS = cairo_image_surface_get_data(BIG);
+                        for (int y = 0; y < H; ++y)
+                            for (int x = 0; x < W; ++x)
+                                B_PIXELS[y * B_STRIDE + x * 4 + 3] = 0xFF;
+                        cairo_surface_mark_dirty(BIG);
+
+                        m_customWallpaperBlurredTex = makeShared<Render::GL::CGLTexture>(DRM_FORMAT_XRGB8888, B_PIXELS, sc<uint32_t>(B_STRIDE), Vector2D{sc<double>(W), sc<double>(H)});
+                        cairo_surface_destroy(BIG);
+                    }
+                }
+            }
+            if (SURF)
+                cairo_surface_destroy(SURF);
+        }
+
+        const SP<Render::ITexture> TEX = (WANTBLUR && m_customWallpaperBlurredTex) ? m_customWallpaperBlurredTex : m_customWallpaperTex;
+        if (TEX && TEX->m_size.x > 0 && TEX->m_size.y > 0) {
+            // Cover-fit: fill the monitor preserving aspect ratio, centered.
+            const Vector2D MSIZE        = monitor->m_pixelSize;
+            const Vector2D TSIZE        = TEX->m_size;
+            const float    COVERSCALE   = std::max(MSIZE.x / TSIZE.x, MSIZE.y / TSIZE.y);
+            const Vector2D RENDEREDSIZE = TSIZE * COVERSCALE;
+            const Vector2D OFFSET       = (MSIZE - RENDEREDSIZE) / 2.0;
+            const CBox     BOX          = {OFFSET.x, OFFSET.y, RENDEREDSIZE.x, RENDEREDSIZE.y};
+            const CRegion  DAMAGE{CBox{0, 0, MSIZE.x, MSIZE.y}};
+            g_pHyprRenderer->draw(
+                CTexPassElement::SRenderData{
+                    .tex    = TEX,
+                    .box    = BOX,
+                    .damage = DAMAGE,
+                },
+                DAMAGE);
+            return;
+        }
+        // Texture failed to load — fall through to the default backdrop.
+    }
 
     g_pHyprRenderer->renderBackground(monitor);
 
@@ -2549,6 +2761,16 @@ void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceId
         workspace->m_forceRendering = WASFORCERENDERING;
     });
 
+    // Render TOP and OVERLAY layer surfaces (top bar, dock, etc.) into each
+    // workspace card so previews reflect the live shell as it appears on
+    // screen. Via a scope guard so it also covers the fullscreen-workspace
+    // early return below (Super+D and similar) — without it, a workspace with
+    // a fullscreen window would skip the in-card bar render entirely.
+    auto renderShellLayersOnExit = Hyprutils::Utils::CScopeGuard([monitor, WORKSPACEBOX, renderScale, now] {
+        renderOverviewLayerLevel(monitor, ZWLR_LAYER_SHELL_V1_LAYER_TOP, WORKSPACEBOX, renderScale, now);
+        renderOverviewLayerLevel(monitor, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, WORKSPACEBOX, renderScale, now);
+    });
+
     const auto renderOverviewWindow = [&](const PHLWINDOW& window) {
         if (!shouldShowOverviewWindow(window))
             return;
@@ -3453,8 +3675,14 @@ void CScrollOverview::render() {
     }
 
     const auto WALLPAPERMODE = ScrollOverview::Config::getWallpaperMode();
+    const bool HASCUSTOMWP   = !ScrollOverview::Config::getWallpaperPath().empty();
 
-    if (ScrollOverview::Config::getBlur() && WALLPAPERMODE != 1) {
+    if (HASCUSTOMWP && WALLPAPERMODE != 1) {
+        // Custom image-file wallpaper bakes its own CPU pre-blur inside
+        // renderGlobalWallpaper — Hyprland's GL blur (blurFramebuffer) produces
+        // noise against this texture, so skip the GL blur cache entirely.
+        renderGlobalWallpaper(MONITOR, NOW);
+    } else if (ScrollOverview::Config::getBlur() && WALLPAPERMODE != 1) {
         updateBackdropBlurCache(MONITOR, WALLPAPERMODE, NOW);
         if (backdropBlurFB && backdropBlurFB->isAllocated() && backdropBlurFB->getTexture())
             renderBackdropBlurCache(MONITOR);

@@ -175,6 +175,11 @@ void registerLegacy() {
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:scale", Hyprlang::FLOAT{0.5F});
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:workspace_gap", Hyprlang::INT{0});
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:wallpaper", Hyprlang::INT{0});
+    // Optional image-file backdrop. When set, the overview backdrop is loaded
+    // from this path instead of captured from a wlr-layer-shell BACKGROUND
+    // surface — needed for Quickshell/Qt-painted wallpaper setups (dots-hyprland)
+    // whose layer surface isn't stable to sample mid-render.
+    HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:wallpaper_path", Hyprlang::STRING{""});
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:blur", Hyprlang::INT{0});
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:shadow:enabled", Hyprlang::INT{0});
     HyprlandAPI::addConfigValue(SCROLLOVERVIEW_HANDLE, "plugin:scrolloverview:shadow:range", Hyprlang::INT{-1});
@@ -225,6 +230,15 @@ bool getBlur() {
         return false;
 
     return getValue<bool>("plugin:scrolloverview:blur");
+}
+
+std::string getWallpaperPath() {
+    // Legacy-config only (no lua field). In lua-config mode the legacy value
+    // isn't registered, so return empty — matches the other getters' pattern.
+    if (::Config::mgr()->type() == ::Config::CONFIG_LUA)
+        return "";
+
+    return getValue<std::string>("plugin:scrolloverview:wallpaper_path");
 }
 
 ::Config::CCssGapData getCssGapData(const std::string& name) {

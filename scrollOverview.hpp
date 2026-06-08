@@ -18,6 +18,9 @@
 #include "IOverview.hpp"
 
 class CMonitor;
+namespace Render {
+    class ITexture;
+}
 struct wl_event_source;
 
 class CScrollOverview : public IOverview {
@@ -232,6 +235,12 @@ class CScrollOverview : public IOverview {
     CHyprSignalListener             workspaceActiveHook;
 
     bool                             swipe = false;
+
+    // Custom-wallpaper backdrop (plugin:scrolloverview:wallpaper_path). Loaded
+    // lazily by renderGlobalWallpaper(), cached until the path config changes.
+    SP<Render::ITexture>             m_customWallpaperTex;
+    SP<Render::ITexture>             m_customWallpaperBlurredTex;
+    std::string                      m_lastLoadedWallpaperPath;
 
     friend class CScrollOverviewPassElement;
 };

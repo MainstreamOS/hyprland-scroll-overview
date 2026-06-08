@@ -87,6 +87,7 @@ float        getScale();
 int          getWorkspaceGap();
 int          getWallpaperMode();
 bool         getBlur();
+std::string  getWallpaperPath();
 ::Config::CCssGapData getCssGapData(const std::string& name);
 int          getShadowEnabled();
 int          getShadowRange();
