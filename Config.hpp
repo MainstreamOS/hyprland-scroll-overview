@@ -6,36 +6,28 @@
 #include <hyprland/src/config/ConfigValue.hpp>
 #include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp>
 
-#include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
 
-extern "C" {
-struct lua_State;
-}
-
-struct SScrollOverviewLuaConfig {
-    std::optional<int>     gestureDistance;
-    std::optional<float>   scale;
-    std::optional<int>     workspaceGap;
-    std::optional<int>     wallpaper;
-    std::optional<bool>    blur;
-    std::optional<bool>    shadowEnabled;
-    std::optional<int>     shadowRange;
-    std::optional<int>     shadowRenderPower;
-    std::optional<int64_t> shadowColor;
-};
-
 namespace ScrollOverview::Config {
 
 using TOverviewDispatcher = SDispatchResult (*)(std::string);
+using TGestureRegistrar   = SDispatchResult (*)(size_t fingerCount, const std::string& direction, const std::string& action, const std::string& mods, float deltaScale,
+                                                bool disableInhibit);
 
-const SScrollOverviewLuaConfig& lua();
+enum class ELayout {
+    VERTICAL,
+    HORIZONTAL,
+};
 
-void registerLua(TOverviewDispatcher dispatcher);
+enum class EScrollAction {
+    WORKSPACE,
+    COLUMN,
+};
+
+void registerLua(TOverviewDispatcher dispatcher, TGestureRegistrar gestureRegistrar);
 void registerLegacy();
 
 template <typename T>
@@ -82,12 +74,18 @@ void setValue(const std::string& name, const T& value) {
         *getValuePtr<TValue>(name) = value;
 }
 
-int          getGestureDistance();
-float        getScale();
-int          getWorkspaceGap();
-int          getWallpaperMode();
-bool         getBlur();
-std::string  getWallpaperPath();
+int           getGestureDistance();
+float         getScale();
+int           getWorkspaceGap();
+ELayout       getLayout();
+int           getScrollEventDelay();
+bool          getLeftHanded();
+int           getDragMode();
+EScrollAction getVerticalScrollAction(ELayout layout);
+EScrollAction getHorizontalScrollAction(ELayout layout);
+int           getWallpaperMode();
+bool          getBlur();
+std::string   getWallpaperPath();
 ::Config::CCssGapData getCssGapData(const std::string& name);
 int          getShadowEnabled();
 int          getShadowRange();

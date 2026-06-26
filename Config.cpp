@@ -1,6 +1,12 @@
 #include "Config.hpp"
 
 #include <algorithm>
+#include <hyprland/src/config/values/types/BoolValue.hpp>
+#include <hyprland/src/config/values/types/ColorValue.hpp>
+#include <hyprland/src/config/values/types/FloatValue.hpp>
+#include <hyprland/src/config/values/types/IntValue.hpp>
+#include <hyprland/src/config/values/types/StringValue.hpp>
+#include <hyprland/src/managers/KeybindManager.hpp>
 
 #include <hyprland/src/config/values/types/IntValue.hpp>
 #include <hyprland/src/config/values/types/FloatValue.hpp>
@@ -13,55 +19,16 @@ extern "C" {
 
 namespace {
 
-SScrollOverviewLuaConfig                      g_luaConfig;
-ScrollOverview::Config::TOverviewDispatcher  g_overviewDispatcher = nullptr;
+ScrollOverview::Config::TOverviewDispatcher g_overviewDispatcher = nullptr;
+ScrollOverview::Config::TGestureRegistrar   g_gestureRegistrar   = nullptr;
 
-// V2 config values. addConfigValue (V1) is a no-op under Hyprland's Lua config
-// manager, so plugin keys set via hl.config({plugin={scrolloverview={...}}}) —
-// how dots-hyprland and the InterfaceConfig panel configure this plugin — never
-// reached the getters. addConfigValueV2 registers through the manager-agnostic
-// path; the getters read the live value via ->value().
-struct SConfigValues {
-    SP<::Config::Values::CIntValue>    gestureDistance;
-    SP<::Config::Values::CFloatValue>  scale;
-    SP<::Config::Values::CIntValue>    workspaceGap;
-    SP<::Config::Values::CIntValue>    wallpaperMode;
-    SP<::Config::Values::CStringValue> wallpaperPath;
-    SP<::Config::Values::CIntValue>    blur;
-    SP<::Config::Values::CIntValue>    shadowEnabled;
-    SP<::Config::Values::CIntValue>    shadowRange;
-    SP<::Config::Values::CIntValue>    shadowRenderPower;
-    SP<::Config::Values::CIntValue>    shadowColor;
-};
-SConfigValues g_soValues;
-
-int getLegacyPluginIntValueOr(const std::string& name, int fallback) {
-    if (::Config::mgr()->type() == ::Config::CONFIG_LUA)
-        return fallback;
-
-    const auto VALUE = HyprlandAPI::getConfigValue(SCROLLOVERVIEW_HANDLE, name);
-    if (!VALUE)
-        return fallback;
-
-    const auto DATA = reinterpret_cast<Hyprlang::INT* const*>(VALUE->getDataStaticPtr());
-    if (!DATA || !*DATA)
-        return fallback;
-
-    return sc<int>(**DATA);
+bool isOverviewArgValid(const std::string_view arg) {
+    return arg == "toggle" || arg == "select" || arg == "on" || arg == "enable" || arg == "off" || arg == "disable";
 }
 
-int overviewLua(lua_State* L) {
+int dispatchOverviewLua(lua_State* L, const char* arg) {
     if (!g_overviewDispatcher)
         return luaL_error(L, "overview: dispatcher is not registered");
-
-    const char* arg = "toggle";
-
-    if (lua_gettop(L) >= 1 && !lua_isnoneornil(L, 1)) {
-        if (!lua_isstring(L, 1))
-            return luaL_error(L, "overview: expected an optional string argument");
-
-        arg = lua_tostring(L, 1);
-    }
 
     const auto result = g_overviewDispatcher(arg);
     if (!result.success)
@@ -70,108 +37,151 @@ int overviewLua(lua_State* L) {
     return 0;
 }
 
+int overviewDispatchToggleLua(lua_State* L) {
+    return dispatchOverviewLua(L, "toggle");
+}
+
+int overviewDispatchSelectLua(lua_State* L) {
+    return dispatchOverviewLua(L, "select");
+}
+
+int overviewDispatchOnLua(lua_State* L) {
+    return dispatchOverviewLua(L, "on");
+}
+
+int overviewDispatchEnableLua(lua_State* L) {
+    return dispatchOverviewLua(L, "enable");
+}
+
+int overviewDispatchOffLua(lua_State* L) {
+    return dispatchOverviewLua(L, "off");
+}
+
+int overviewDispatchDisableLua(lua_State* L) {
+    return dispatchOverviewLua(L, "disable");
+}
+
+int overviewLua(lua_State* L) {
+    const char* arg = "toggle";
+
+    if (lua_gettop(L) >= 1) {
+        if (lua_isnoneornil(L, 1))
+            return luaL_error(L, "overview: expected a string argument; did you forget quotes around it?");
+
+        if (!lua_isstring(L, 1))
+            return luaL_error(L, "overview: expected an optional string argument");
+
+        arg = lua_tostring(L, 1);
+    }
+
+    if (!isOverviewArgValid(arg))
+        return luaL_error(L, "overview: invalid argument '%s'", arg);
+
+    if (g_pKeybindManager && g_pKeybindManager->m_currentKeybind && g_pKeybindManager->m_currentKeybind->handler == "__lua") {
+        if (!g_overviewDispatcher)
+            return luaL_error(L, "overview: dispatcher is not registered");
+
+        const auto result = g_overviewDispatcher(arg);
+        if (!result.success)
+            return luaL_error(L, "overview: %s", result.error.c_str());
+
+        return 0;
+    }
+
+    if (std::string_view{arg} == "toggle")
+        lua_pushcfunction(L, overviewDispatchToggleLua);
+    else if (std::string_view{arg} == "select")
+        lua_pushcfunction(L, overviewDispatchSelectLua);
+    else if (std::string_view{arg} == "on")
+        lua_pushcfunction(L, overviewDispatchOnLua);
+    else if (std::string_view{arg} == "enable")
+        lua_pushcfunction(L, overviewDispatchEnableLua);
+    else if (std::string_view{arg} == "off")
+        lua_pushcfunction(L, overviewDispatchOffLua);
+    else if (std::string_view{arg} == "disable")
+        lua_pushcfunction(L, overviewDispatchDisableLua);
+    else
+        return luaL_error(L, "overview: invalid argument '%s'", arg);
+
+    return 1;
+}
+
 int configureLua(lua_State* L) {
     if (!lua_istable(L, 1))
         return luaL_error(L, "configure: expected a table");
 
-    const int TABLE = lua_absindex(L, 1);
+    const int CONFIG = lua_absindex(L, 1);
 
-    const auto readInt = [L, TABLE](const char* name, std::optional<int>& target) -> bool {
-        lua_getfield(L, TABLE, name);
-        if (lua_isnil(L, -1)) {
-            lua_pop(L, 1);
-            return true;
-        }
+    lua_getglobal(L, "hl");
+    if (!lua_istable(L, -1))
+        return luaL_error(L, "configure: global hl table is not available");
 
-        if (!lua_isinteger(L, -1)) {
-            lua_pop(L, 1);
-            luaL_error(L, "configure: %s must be an integer", name);
-            return false;
-        }
-
-        target = sc<int>(lua_tointeger(L, -1));
+    lua_getfield(L, -1, "config");
+    if (!lua_isfunction(L, -1)) {
         lua_pop(L, 1);
-        return true;
-    };
+        return luaL_error(L, "configure: hl.config is not available");
+    }
 
-    const auto readFloat = [L, TABLE](const char* name, std::optional<float>& target) -> bool {
-        lua_getfield(L, TABLE, name);
-        if (lua_isnil(L, -1)) {
-            lua_pop(L, 1);
-            return true;
-        }
+    lua_newtable(L);
+    lua_newtable(L);
+    lua_pushvalue(L, CONFIG);
+    lua_setfield(L, -2, "scrolloverview");
+    lua_setfield(L, -2, "plugin");
 
-        if (!lua_isnumber(L, -1)) {
-            lua_pop(L, 1);
-            luaL_error(L, "configure: %s must be a number", name);
-            return false;
-        }
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        const char* err = lua_tostring(L, -1);
+        lua_pop(L, 2);
+        return luaL_error(L, "configure: %s", err ? err : "hl.config failed");
+    }
 
-        target = sc<float>(lua_tonumber(L, -1));
-        lua_pop(L, 1);
-        return true;
-    };
-
-    const auto readBool = [L, TABLE](const char* name, std::optional<bool>& target) -> bool {
-        lua_getfield(L, TABLE, name);
-        if (lua_isnil(L, -1)) {
-            lua_pop(L, 1);
-            return true;
-        }
-
-        if (!lua_isboolean(L, -1)) {
-            lua_pop(L, 1);
-            luaL_error(L, "configure: %s must be a boolean", name);
-            return false;
-        }
-
-        target = lua_toboolean(L, -1);
-        lua_pop(L, 1);
-        return true;
-    };
-
-    if (!readInt("gesture_distance", g_luaConfig.gestureDistance) || !readFloat("scale", g_luaConfig.scale) ||
-        !readInt("workspace_gap", g_luaConfig.workspaceGap) || !readInt("wallpaper", g_luaConfig.wallpaper) || !readBool("blur", g_luaConfig.blur))
-        return 0;
-
-    lua_getfield(L, TABLE, "shadow");
-    if (lua_istable(L, -1)) {
-        const int SHADOW = lua_absindex(L, -1);
-
-        lua_getfield(L, SHADOW, "enabled");
-        if (!lua_isnil(L, -1)) {
-            if (!lua_isboolean(L, -1))
-                return luaL_error(L, "configure: shadow.enabled must be a boolean");
-            g_luaConfig.shadowEnabled = lua_toboolean(L, -1);
-        }
-        lua_pop(L, 1);
-
-        lua_getfield(L, SHADOW, "range");
-        if (!lua_isnil(L, -1)) {
-            if (!lua_isinteger(L, -1))
-                return luaL_error(L, "configure: shadow.range must be an integer");
-            g_luaConfig.shadowRange = sc<int>(lua_tointeger(L, -1));
-        }
-        lua_pop(L, 1);
-
-        lua_getfield(L, SHADOW, "render_power");
-        if (!lua_isnil(L, -1)) {
-            if (!lua_isinteger(L, -1))
-                return luaL_error(L, "configure: shadow.render_power must be an integer");
-            g_luaConfig.shadowRenderPower = sc<int>(lua_tointeger(L, -1));
-        }
-        lua_pop(L, 1);
-
-        lua_getfield(L, SHADOW, "color");
-        if (!lua_isnil(L, -1)) {
-            if (!lua_isinteger(L, -1))
-                return luaL_error(L, "configure: shadow.color must be an integer");
-            g_luaConfig.shadowColor = sc<int64_t>(lua_tointeger(L, -1));
-        }
-        lua_pop(L, 1);
-    } else if (!lua_isnil(L, -1))
-        return luaL_error(L, "configure: shadow must be a table");
     lua_pop(L, 1);
+
+    return 0;
+}
+
+int gestureLua(lua_State* L) {
+    if (!g_gestureRegistrar)
+        return luaL_error(L, "gesture: registrar is not registered");
+
+    if (!lua_istable(L, 1))
+        return luaL_error(L, "gesture: expected a table, e.g. { fingers = 3, direction = \"up\" }");
+
+    lua_getfield(L, 1, "fingers");
+    if (!lua_isinteger(L, -1))
+        return luaL_error(L, "gesture: 'fingers' (integer) is required");
+    const size_t FINGERS = sc<size_t>(lua_tointeger(L, -1));
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "direction");
+    if (!lua_isstring(L, -1))
+        return luaL_error(L, "gesture: 'direction' (string) is required");
+    const std::string DIRECTION = lua_tostring(L, -1);
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "action");
+    const std::string ACTION = lua_isstring(L, -1) ? lua_tostring(L, -1) : "overview";
+    lua_pop(L, 1);
+
+    // accept either "mods" or "mod"
+    lua_getfield(L, 1, "mods");
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_getfield(L, 1, "mod");
+    }
+    const std::string MODS = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "scale");
+    const float SCALE = lua_isnumber(L, -1) ? sc<float>(lua_tonumber(L, -1)) : 1.F;
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "disable_inhibit");
+    const bool DISABLE_INHIBIT = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+
+    const auto result = g_gestureRegistrar(FINGERS, DIRECTION, ACTION, MODS, SCALE, DISABLE_INHIBIT);
+    if (!result.success)
+        return luaL_error(L, "gesture: %s", result.error.c_str());
 
     return 0;
 }
@@ -180,82 +190,119 @@ int configureLua(lua_State* L) {
 
 namespace ScrollOverview::Config {
 
-const SScrollOverviewLuaConfig& lua() {
-    return g_luaConfig;
-}
-
-void registerLua(TOverviewDispatcher dispatcher) {
+void registerLua(TOverviewDispatcher dispatcher, TGestureRegistrar gestureRegistrar) {
     if (::Config::mgr()->type() != ::Config::CONFIG_LUA)
         return;
 
     g_overviewDispatcher = dispatcher;
+    g_gestureRegistrar   = gestureRegistrar;
     HyprlandAPI::addLuaFunction(SCROLLOVERVIEW_HANDLE, "scrolloverview", "overview", ::overviewLua);
     HyprlandAPI::addLuaFunction(SCROLLOVERVIEW_HANDLE, "scrolloverview", "configure", ::configureLua);
+    HyprlandAPI::addLuaFunction(SCROLLOVERVIEW_HANDLE, "scrolloverview", "gesture", ::gestureLua);
 }
 
 void registerLegacy() {
-    // Registered through addConfigValueV2 (manager-agnostic) so the keys resolve
-    // under both the legacy hyprland.conf and the Lua config managers — V1
-    // addConfigValue is a no-op under the Lua manager. Read via ->value().
-    g_soValues.gestureDistance   = makeShared<::Config::Values::CIntValue>("plugin:scrolloverview:gesture_distance", "Pixel distance treated as the gesture max", 200);
-    g_soValues.scale             = makeShared<::Config::Values::CFloatValue>("plugin:scrolloverview:scale", "Overview workspace zoom factor", 0.5F);
-    g_soValues.workspaceGap      = makeShared<::Config::Values::CIntValue>("plugin:scrolloverview:workspace_gap", "Pixel gap between workspaces in overview", 0);
-    g_soValues.wallpaperMode     = makeShared<::Config::Values::CIntValue>("plugin:scrolloverview:wallpaper", "0 global only, 1 per-workspace only, 2 both", 0);
-    // Optional image-file backdrop — needed for Quickshell/Qt-painted wallpaper
-    // setups (dots-hyprland) whose layer surface isn't stable to sample.
-    g_soValues.wallpaperPath     = makeShared<::Config::Values::CStringValue>("plugin:scrolloverview:wallpaper_path", "Path to a static image used as the overview backdrop", "");
-    g_soValues.blur              = makeShared<::Config::Values::CIntValue>("plugin:scrolloverview:blur", "Blur the global overview wallpaper", 0);
-    g_soValues.shadowEnabled     = makeShared<::Config::Values::CIntValue>("plugin:scrolloverview:shadow:enabled", "Render shadows behind overview windows", 0);
-    g_soValues.shadowRange       = makeShared<::Config::Values::CIntValue>("plugin:scrolloverview:shadow:range", "Overview shadow range, -1 inherits", -1);
-    g_soValues.shadowRenderPower = makeShared<::Config::Values::CIntValue>("plugin:scrolloverview:shadow:render_power", "Overview shadow render power, -1 inherits", -1);
-    g_soValues.shadowColor       = makeShared<::Config::Values::CIntValue>("plugin:scrolloverview:shadow:color", "Overview shadow color, -1 inherits", -1);
+    using namespace ::Config::Values;
 
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_soValues.gestureDistance);
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_soValues.scale);
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_soValues.workspaceGap);
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_soValues.wallpaperMode);
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_soValues.wallpaperPath);
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_soValues.blur);
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_soValues.shadowEnabled);
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_soValues.shadowRange);
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_soValues.shadowRenderPower);
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, g_soValues.shadowColor);
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:gesture_distance", "gesture distance in pixels", 200, SIntValueOptions{.min = 1}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CFloatValue>("plugin:scrolloverview:scale", "overview scale", 0.5F, SFloatValueOptions{.min = 0.1F, .max = 0.9F}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:workspace_gap", "gap between overview workspaces", 0, SIntValueOptions{.min = 0}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CStringValue>("plugin:scrolloverview:layout", "overview layout", Hyprlang::STRING{"vertical"}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:input:scroll_event_delay", "minimum delay (ms) between discrete scroll steps (wheel workspace nav and trackpad focus stepping)", 200, SIntValueOptions{.min = 0}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:input:left_handed", "overview left handed mouse buttons, 2 follows input:left_handed", 2,
+                                                        SIntValueOptions{.min = 0, .max = 2}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:input:scrolling_mode", "overview mouse wheel behavior", 0,
+                                                        SIntValueOptions{.min = 0, .max = 3}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:input:drag_mode", "overview mouse drag behavior", 0,
+                                                        SIntValueOptions{.min = 0, .max = 1}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:wallpaper", "wallpaper mode", 0, SIntValueOptions{.min = 0, .max = 2}));
+    // Optional image-file backdrop -- needed for Quickshell/Qt-painted wallpaper
+    // setups (dots-hyprland) whose layer surface isn't stable to sample.
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CStringValue>("plugin:scrolloverview:wallpaper_path", "path to a static image used as the overview backdrop", Hyprlang::STRING{""}));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, makeShared<CBoolValue>("plugin:scrolloverview:blur", "blur the overview wallpaper", false));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CBoolValue>("plugin:scrolloverview:shadow:enabled", "draw a shadow around each workspace card", false));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:shadow:range", "workspace card shadow range", -1));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CIntValue>("plugin:scrolloverview:shadow:render_power", "workspace card shadow render power", -1));
+    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
+                                  makeShared<CColorValue>("plugin:scrolloverview:shadow:color", "workspace card shadow color", -1));
 }
 
 int getGestureDistance() {
-    if (g_luaConfig.gestureDistance)
-        return std::max<int>(1, *g_luaConfig.gestureDistance);
-    return std::max<int>(1, g_soValues.gestureDistance ? sc<int>(g_soValues.gestureDistance->value()) : 200);
+    return std::max<int>(1, getValue<int>("plugin:scrolloverview:gesture_distance"));
 }
 
 float getScale() {
-    if (g_luaConfig.scale)
-        return std::clamp(*g_luaConfig.scale, 0.1F, 0.9F);
-    return std::clamp(g_soValues.scale ? sc<float>(g_soValues.scale->value()) : 0.5F, 0.1F, 0.9F);
+    return std::clamp(getValue<float>("plugin:scrolloverview:scale"), 0.1F, 0.9F);
 }
 
 int getWorkspaceGap() {
-    if (g_luaConfig.workspaceGap)
-        return std::max<int>(0, *g_luaConfig.workspaceGap);
-    return std::max<int>(0, g_soValues.workspaceGap ? sc<int>(g_soValues.workspaceGap->value()) : 0);
+    return std::max<int>(0, getValue<int>("plugin:scrolloverview:workspace_gap"));
+}
+
+ELayout getLayout() {
+    const auto LAYOUT = getValue<std::string>("plugin:scrolloverview:layout");
+    return LAYOUT == "horizontal" ? ELayout::HORIZONTAL : ELayout::VERTICAL;
+}
+
+bool getLeftHanded() {
+    const auto LEFT_HANDED = getValue<int>("plugin:scrolloverview:input:left_handed");
+    if (LEFT_HANDED <= 1)
+        return LEFT_HANDED != 0;
+
+    return getValue<bool>("input:left_handed");
+}
+
+int getDragMode() {
+    return std::clamp(getValue<int>("plugin:scrolloverview:input:drag_mode"), 0, 1);
+}
+
+static EScrollAction defaultVerticalScrollAction(ELayout layout) {
+    return layout == ELayout::HORIZONTAL ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
+}
+
+EScrollAction getVerticalScrollAction(ELayout layout) {
+    const auto MODE = std::clamp(getValue<int>("plugin:scrolloverview:input:scrolling_mode"), 0, 3);
+
+    switch (MODE) {
+        case 1: return defaultVerticalScrollAction(layout) == EScrollAction::WORKSPACE ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
+        case 2: return EScrollAction::WORKSPACE;
+        case 3: return EScrollAction::COLUMN;
+        case 0:
+        default: return defaultVerticalScrollAction(layout);
+    }
+}
+
+EScrollAction getHorizontalScrollAction(ELayout layout) {
+    return getVerticalScrollAction(layout) == EScrollAction::WORKSPACE ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
+}
+
+int getScrollEventDelay() {
+    return std::max<int>(0, getValue<int>("plugin:scrolloverview:input:scroll_event_delay"));
 }
 
 int getWallpaperMode() {
-    if (g_luaConfig.wallpaper)
-        return std::clamp<int>(*g_luaConfig.wallpaper, 0, 2);
-    return std::clamp<int>(g_soValues.wallpaperMode ? sc<int>(g_soValues.wallpaperMode->value()) : 0, 0, 2);
-}
-
-bool getBlur() {
-    if (g_luaConfig.blur)
-        return *g_luaConfig.blur;
-    return g_soValues.blur && g_soValues.blur->value() != 0;
+    return std::clamp<int>(getValue<int>("plugin:scrolloverview:wallpaper"), 0, 2);
 }
 
 std::string getWallpaperPath() {
-    if (g_soValues.wallpaperPath)
-        return g_soValues.wallpaperPath->value();
-    return "";
+    return getValue<std::string>("plugin:scrolloverview:wallpaper_path");
+}
+
+bool getBlur() {
+    return getValue<bool>("plugin:scrolloverview:blur");
 }
 
 ::Config::CCssGapData getCssGapData(const std::string& name) {
@@ -272,27 +319,19 @@ std::string getWallpaperPath() {
 }
 
 int getShadowEnabled() {
-    if (g_luaConfig.shadowEnabled)
-        return *g_luaConfig.shadowEnabled ? 1 : 0;
-    return g_soValues.shadowEnabled ? sc<int>(g_soValues.shadowEnabled->value()) : 0;
+    return getValue<bool>("plugin:scrolloverview:shadow:enabled") ? 1 : 0;
 }
 
 int getShadowRange() {
-    if (g_luaConfig.shadowRange)
-        return *g_luaConfig.shadowRange;
-    return g_soValues.shadowRange ? sc<int>(g_soValues.shadowRange->value()) : -1;
+    return getValue<int>("plugin:scrolloverview:shadow:range");
 }
 
 int getShadowRenderPower() {
-    if (g_luaConfig.shadowRenderPower)
-        return *g_luaConfig.shadowRenderPower;
-    return g_soValues.shadowRenderPower ? sc<int>(g_soValues.shadowRenderPower->value()) : -1;
+    return getValue<int>("plugin:scrolloverview:shadow:render_power");
 }
 
 int64_t getShadowColor() {
-    if (g_luaConfig.shadowColor)
-        return *g_luaConfig.shadowColor;
-    return g_soValues.shadowColor ? sc<int64_t>(g_soValues.shadowColor->value()) : -1;
+    return getValue<int64_t>("plugin:scrolloverview:shadow:color");
 }
 
 }
