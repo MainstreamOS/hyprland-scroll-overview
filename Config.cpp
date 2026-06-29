@@ -8,10 +8,6 @@
 #include <hyprland/src/config/values/types/StringValue.hpp>
 #include <hyprland/src/managers/KeybindManager.hpp>
 
-#include <hyprland/src/config/values/types/IntValue.hpp>
-#include <hyprland/src/config/values/types/FloatValue.hpp>
-#include <hyprland/src/config/values/types/StringValue.hpp>
-
 extern "C" {
 #include <lauxlib.h>
 #include <lua.h>
