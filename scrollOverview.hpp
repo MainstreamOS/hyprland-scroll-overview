@@ -12,10 +12,12 @@
 #include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprland/src/render/types.hpp>
 #include <chrono>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "Config.hpp"
+#include "DropIndicator.hpp"
 #include "IOverview.hpp"
 
 class CMonitor;
@@ -27,30 +29,32 @@ struct wl_event_source;
 class CScrollOverview : public IOverview {
   public:
     CScrollOverview(PHLWORKSPACE startedOn_, bool swipe = false);
-    virtual ~CScrollOverview();
+    ~CScrollOverview() override;
 
-    virtual void render();
-    virtual void damage();
+    void         render() override;
+    void         damage() override;
     void         markBlurDirty();
     void         markBackdropBlurDirty();
-    virtual void onDamageReported();
-    virtual bool shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface);
-    virtual bool shouldAllowSurfaceFrame(SP<CWLSurfaceResource> surface, const Time::steady_tp& now);
-    virtual bool shouldAllowRealtimePreviewSchedule();
-    virtual bool shouldSuppressRenderDamage() const;
-    virtual void onPreRender();
+    void         onDamageReported() override;
+    bool         shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) override;
+    bool         shouldAllowSurfaceFrame(SP<CWLSurfaceResource> surface, const Time::steady_tp& now) override;
+    bool         shouldAllowRealtimePreviewSchedule() override;
+    bool         shouldSuppressRenderDamage() const override;
+    void         onPreRender() override;
 
-    virtual void setClosing(bool closing);
+    void         setClosing(bool closing) override;
 
-    virtual void resetSwipe();
-    virtual void onSwipeUpdate(double delta);
-    virtual void onSwipeEnd();
+    void         resetSwipe() override;
+    void         onSwipeUpdate(double delta) override;
+    void         onSwipeEnd() override;
 
     // close without a selection
-    virtual void close();
-    virtual void selectHoveredWorkspace();
+    void         close() override;
+    void         selectHoveredWorkspace() override;
+    bool         moveSelection(const std::string& direction) override;
+    bool         windowDispatcherAction(const std::string& action) override;
 
-    virtual void fullRender();
+    void         fullRender() override;
 
   private:
     void   rebuildWorkspaceImages();
@@ -64,15 +68,18 @@ class CScrollOverview : public IOverview {
     void   renderWorkspaceBackground(PHLMONITOR monitor, size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale, int wallpaperMode, const Time::steady_tp& now);
     void   renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale, int wallpaperMode, const Time::steady_tp& now);
     bool   hasVisiblePrecomputedBlurWindow(PHLMONITOR monitor, size_t activeIdx, float workspacePitch, float renderScale) const;
-    void   renderWindowLive(PHLMONITOR monitor, PHLWINDOW window, const CBox& windowBox, float renderScale, const Time::steady_tp& now, const CBox* workspaceBox = nullptr);
+    void   renderWindowLive(PHLMONITOR monitor, PHLWINDOW window, const CBox& windowBox, float renderScale, const Time::steady_tp& now, const CBox* workspaceBox = nullptr,
+                             bool dragged = false);
     void   renderDraggedWindow(PHLMONITOR monitor, size_t activeIdx, float workspacePitch, float renderScale, const Time::steady_tp& now);
     void   renderPinnedFloatingWindows(PHLMONITOR monitor, float overviewScale, const Time::steady_tp& now);
     void   moveViewportWorkspace(bool up);
     void   trackpadSwipeLayout(const PHLWORKSPACE target, const double delta);
     void   trackpadSwipeWorkspace(const double delta);
-    void   finishWorkspaceScrollFollow(float logicalPitch);
+    void   finishWorkspaceScrollFollow();
+    double trackpadWorkspaceScrollOffset(PHLMONITOR monitor, float renderScale);
     bool   scrollStepAllowed(uint32_t timeMs);
-    bool   moveWindowSelection(const std::string& direction);
+    bool   selectOverviewWindow(PHLWINDOW window, size_t workspaceIdx, bool syncFocus = false);
+    bool   selectWindowAtOverviewCursor(bool syncFocus = false);
     void   rememberSelection(PHLWINDOW window);
     void   syncSelectionToViewport();
     void   syncFocusedSelection();
@@ -85,10 +92,13 @@ class CScrollOverview : public IOverview {
     PHLWINDOW windowAtOverviewPoint(const Vector2D& point, size_t* workspaceIdx = nullptr) const;
     PHLWINDOW windowAtOverviewCursor(size_t* workspaceIdx = nullptr);
     PHLWINDOW windowAtOverviewCursorOnWorkspace(size_t workspaceIdx, const PHLWINDOW& ignoredWindow = nullptr, CBox* windowBox = nullptr) const;
+    CDropIndicator::SDropAnchor dropAnchorAtOverviewCursorOnWorkspace(size_t workspaceIdx, const PHLWINDOW& ignoredWindow = nullptr);
     PHLWORKSPACE workspaceAtOverviewPoint(const Vector2D& point, size_t* workspaceIdx = nullptr) const;
+    PHLWORKSPACE workspaceAtOverviewDropPoint(const Vector2D& point, size_t* workspaceIdx = nullptr, const PHLWINDOW& draggedWindow = nullptr) const;
     PHLWORKSPACE workspaceAtOverviewCursor(size_t* workspaceIdx = nullptr) const;
     Vector2D  overviewPointToGlobal(size_t workspaceIdx, const Vector2D& pointLocal) const;
     CBox      draggedWindowBox(size_t workspaceIdx) const;
+    void      refreshDragOriginalOverviewBoxes();
     void      clearDragPending();
     void      beginWindowDrag(PHLWINDOW window);
     void      updateWindowDrag();
@@ -102,6 +112,7 @@ class CScrollOverview : public IOverview {
     void      endScrollingPan();
     void      focusMostVisibleScrollingWindow(const PHLWORKSPACE& workspace);
     bool      moveScrollingColumnSelection(bool next);
+    bool      moveScrollingStackSelection(bool next);
     void   forceSurfaceVisibility(SP<CWLSurfaceResource> surface);
     void   forceWindowSurfaceVisibility(PHLWINDOW window);
     void   forceWindowVisible(PHLWINDOW window);
@@ -119,17 +130,20 @@ class CScrollOverview : public IOverview {
     size_t activeWorkspaceIndex() const;
     void   sendOverviewFrameCallbacks(const Time::steady_tp& now);
     bool   isVisibleRealtimePreviewWindow(const PHLWINDOW& window) const;
+    bool   hasRunningWorkspaceAnimation() const;
     bool   shouldAllowRealtimePreviewFrame() const;
     void   scheduleMinimumPreviewFrame();
     void   schedulePreviewFrameAfter(std::chrono::milliseconds delay);
     void   scheduleRealtimePreviewFrame();
     void   releaseInputListeners();
+    void   activateSubmapIfConfigured();
+    void   restoreSubmapIfActive();
+    bool   dispatchSubmapMouseClick(uint32_t button);
     void   requestInputFrame();
     static int realtimePreviewTimerCallback(void* data);
 
     size_t viewportCurrentWorkspace = 0;
     bool   rebuildPending           = false;
-    bool   workspaceSyncPending     = false;
     bool   overviewBlurDirty        = true;
     bool   backdropBlurDirty        = true;
     bool   overviewBlurStateValid   = false;
@@ -169,16 +183,22 @@ class CScrollOverview : public IOverview {
     Vector2D                         dragStartMouseLocal   = Vector2D{};
     Vector2D                         dragGrabOffsetLocal   = Vector2D{};
     Vector2D                         dragOriginalFloatSize = Vector2D{};
+    Vector2D                         dragOriginalTapeTranslation = Vector2D{};
     Vector2D                         resizeStartMouseLocal = Vector2D{};
     Vector2D                         resizeLastMouseLocal  = Vector2D{};
     Vector2D                         scrollingPanLastMouseLocal = Vector2D{};
-    CBox                             dragOriginalBox        = CBox{};
-    CBox                             resizeOriginalBox      = CBox{};
+    CBox                             dragOriginalBox            = CBox{};
+    CBox                             dragOriginalVisualBox      = CBox{};
+    CBox                             dragOriginalOverviewBox    = CBox{};
+    CBox                             dragOriginalOverviewHitbox = CBox{};
+    CBox                             resizeOriginalBox          = CBox{};
+    WORKSPACEID                      focusSyncedFromWorkspaceID = WORKSPACE_INVALID;
     size_t                           resizeWorkspaceIdx     = 0;
     Layout::eRectCorner              resizeCorner           = Layout::CORNER_NONE;
     bool                             dragPendingPrimary    = false;
     bool                             resizePointerDown     = false;
     bool                             scrollingPanPointerDown = false;
+    bool                             submapMouseClickPending = false;
     bool                             dragStartedTiled      = false;
     bool                             emittingFullscreenVisibilityState = false;
     bool                             inputConfigOverridden = false;
@@ -186,6 +206,10 @@ class CScrollOverview : public IOverview {
     bool                             realtimePreviewFrameQueued = false;
     bool                             inputFramePending = false;
     bool                             sendingOverviewFrameCallbacks = false;
+    bool                             usesSubmapKeybinds = false;
+    bool                             submapActive = false;
+    uint32_t                         submapMouseClickButton = 0;
+    std::string                      previousSubmapName;
     int                              previousNoWarps = 0;
     int                              previousWarpOnChangeWorkspace = 0;
     int                              previousWarpOnToggleSpecial = 0;
@@ -260,7 +284,6 @@ class CScrollOverview : public IOverview {
     CHyprSignalListener             keyboardKeyHook;
     CHyprSignalListener             workspaceCreatedHook;
     CHyprSignalListener             workspaceRemovedHook;
-    CHyprSignalListener             workspaceActiveHook;
 
     bool                             swipe = false;
 

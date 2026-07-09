@@ -133,7 +133,7 @@ static void roundStandaloneWindowPassElements(const PHLWINDOW& window, PHLMONITO
         if (!passElement.element)
             continue;
 
-        auto* surfacePassElement = dynamic_cast<CSurfacePassElement*>(passElement.element.get());
+        auto* surfacePassElement = dc<CSurfacePassElement*>(passElement.element.get());
         if (!surfacePassElement || surfacePassElement->m_data.pWindow != window || surfacePassElement->m_data.popup)
             continue;
 
@@ -168,7 +168,7 @@ static SHyprbarGlobalStateMirror* getOverviewHyprbarGlobalState() {
     if (!symbol)
         return nullptr;
 
-    const auto STATEPTR = reinterpret_cast<UP<SHyprbarGlobalStateMirror>*>(symbol);
+    const auto STATEPTR = sc<UP<SHyprbarGlobalStateMirror>*>(symbol);
     if (!STATEPTR || !STATEPTR->get())
         return nullptr;
 
@@ -222,7 +222,7 @@ static void blockOverviewWindowBlurOptimization(const PHLWINDOW& window, size_t 
         if (!passElement.element)
             continue;
 
-        auto* surfacePassElement = dynamic_cast<CSurfacePassElement*>(passElement.element.get());
+        auto* surfacePassElement = dc<CSurfacePassElement*>(passElement.element.get());
         if (!surfacePassElement || surfacePassElement->m_data.pWindow != window)
             continue;
 
@@ -652,7 +652,7 @@ static void renderOverviewGroupTabs(PHLMONITOR monitor, const PHLWINDOW& window,
     if (!monitor || !window || !window->m_group || window->m_group->size() < 1)
         return;
 
-    auto* const GROUPBAR = dynamic_cast<CHyprGroupBarDecoration*>(window->getDecorationByType(DECORATION_GROUPBAR));
+    auto* const GROUPBAR = dc<CHyprGroupBarDecoration*>(window->getDecorationByType(DECORATION_GROUPBAR));
     if (!GROUPBAR)
         return;
 
@@ -756,8 +756,8 @@ static bool overviewWorkspaceBoxReadyForPrecomputedBlur(PHLMONITOR monitor, cons
         workspaceBox->y + workspaceBox->height <= RENDERSIZE.y + EPSILON;
 }
 
-bool shouldUsePrecomputedBlur(const PHLWINDOW& window, PHLMONITOR monitor, const CBox* workspaceBox, const CBox* windowBox) {
-    return ScrollOverview::Config::getValue<bool>("decoration:blur:new_optimizations") && shouldShowOverviewWindow(window) && !window->m_isFloating && shouldBlurBackground(window) &&
+bool shouldUsePrecomputedBlur(const PHLWINDOW& window, PHLMONITOR monitor, const CBox* workspaceBox, const CBox* windowBox, bool dragged) {
+    return !dragged && ScrollOverview::Config::getValue<bool>("decoration:blur:new_optimizations") && shouldShowOverviewWindow(window) && !window->m_isFloating && shouldBlurBackground(window) &&
         overviewWindowFitsWorkspaceBox(workspaceBox, windowBox) && overviewWorkspaceBoxReadyForPrecomputedBlur(monitor, workspaceBox);
 }
 
@@ -816,7 +816,7 @@ void renderOverviewWindow(const SRenderParams& params) {
     });
 
     const size_t firstWindowPassElement = g_pHyprRenderer->m_renderPass.m_passElements.size();
-    const bool   usePrecomputedBlur     = shouldUsePrecomputedBlur(params.window, params.monitor, params.workspaceBox, &params.windowBox);
+    const bool   usePrecomputedBlur     = shouldUsePrecomputedBlur(params.window, params.monitor, params.workspaceBox, &params.windowBox, params.dragged);
     g_pHyprRenderer->renderWindow(params.window, params.monitor, params.now, false, Render::RENDER_PASS_ALL, false, false);
     if (!usePrecomputedBlur)
         blockOverviewWindowBlurOptimization(params.window, firstWindowPassElement);

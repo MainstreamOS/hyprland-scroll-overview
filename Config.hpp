@@ -6,14 +6,14 @@
 #include <hyprland/src/config/ConfigValue.hpp>
 #include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp>
 
-#include <memory>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
 
 namespace ScrollOverview::Config {
 
-using TOverviewDispatcher = SDispatchResult (*)(std::string);
+using TDispatcher       = SDispatchResult (*)(std::string);
+using TGestureKeyword   = Hyprlang::CParseResult (*)(const char* LHS, const char* RHS);
 using TGestureRegistrar   = SDispatchResult (*)(size_t fingerCount, const std::string& direction, const std::string& action, const std::string& mods, float deltaScale,
                                                 bool disableInhibit);
 
@@ -27,16 +27,17 @@ enum class EScrollAction {
     COLUMN,
 };
 
-void registerLua(TOverviewDispatcher dispatcher, TGestureRegistrar gestureRegistrar);
-void registerLegacy();
+void registerDispatcher(const std::string& name, TDispatcher dispatcher);
+void registerGesture(TGestureRegistrar gestureRegistrar, TGestureKeyword gestureKeyword);
+void registerConfig();
 
 template <typename T>
 CConfigValue<T>& valueRef(const std::string& name) {
-    static std::unordered_map<std::string, std::unique_ptr<CConfigValue<T>>> values;
+    static std::unordered_map<std::string, UP<CConfigValue<T>>> values;
 
     const auto [it, inserted] = values.try_emplace(name);
     if (inserted)
-        it->second = std::make_unique<CConfigValue<T>>(name);
+        it->second = makeUnique<CConfigValue<T>>(name);
 
     return *it->second;
 }
@@ -81,15 +82,17 @@ ELayout       getLayout();
 int           getScrollEventDelay();
 bool          getLeftHanded();
 int           getDragMode();
+int           getDragThreshold();
+float         getTouchpadScrollFactor();
 EScrollAction getVerticalScrollAction(ELayout layout);
 EScrollAction getHorizontalScrollAction(ELayout layout);
 int           getWallpaperMode();
 bool          getBlur();
 std::string   getWallpaperPath();
 ::Config::CCssGapData getCssGapData(const std::string& name);
-int          getShadowEnabled();
-int          getShadowRange();
-int          getShadowRenderPower();
-int64_t      getShadowColor();
+int           getShadowEnabled();
+int           getShadowRange();
+int           getShadowRenderPower();
+int64_t       getShadowColor();
 
 }
