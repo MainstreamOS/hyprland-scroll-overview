@@ -7,6 +7,7 @@
 #define protected public
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/Compositor.hpp>
+#include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/config/ConfigValue.hpp>
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/managers/KeybindManager.hpp>
@@ -102,7 +103,7 @@ static float getOverviewWindowTargetOpacity(const PHLWINDOW& window) {
     if (!window)
         return 1.F;
 
-    const bool  fullscreen     = window->isFullscreen();
+    const bool  fullscreen     = Fullscreen::controller()->isFullscreen(window);
     const bool  active         = Desktop::focusState()->window() == window;
     float       targetOpacity  = fullscreen ? ScrollOverview::Config::getValue<float>("decoration:fullscreen_opacity") :
         active ? ScrollOverview::Config::getValue<float>("decoration:active_opacity") : ScrollOverview::Config::getValue<float>("decoration:inactive_opacity");
@@ -118,7 +119,7 @@ static void roundStandaloneWindowPassElements(const PHLWINDOW& window, PHLMONITO
     if (!window || !monitor)
         return;
 
-    if (window->isFullscreen())
+    if (Fullscreen::controller()->isFullscreen(window))
         return;
 
     const int   rounding      = sc<int>(std::round(window->rounding() * monitor->m_scale * renderScale));
@@ -394,7 +395,7 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
 }
 
 static void renderOverviewWindowShadow(PHLMONITOR monitor, const PHLWINDOW& window, const CBox& windowBox, const SOverviewWindowMetrics& metrics, bool selected) {
-    if (!monitor || !window || (!window->m_isMapped && !window->m_fadingOut))
+    if (!monitor || !window || (!window->m_isMapped && !window->m_alpha.isBeingAnimated()))
         return;
 
     const auto PSHADOWS      = ScrollOverview::Config::getValue<int>("decoration:shadow:enabled");
@@ -424,7 +425,7 @@ static void renderOverviewWindowShadow(PHLMONITOR monitor, const PHLWINDOW& wind
     if (shadowBox.width < 1 || shadowBox.height < 1)
         return;
 
-    const auto shadowColor = window->m_realShadowColor->value();
+    const auto shadowColor = window->m_realShadowColor.m_colors.empty() ? CHyprColor{} : window->m_realShadowColor.m_colors.front();
     if (shadowColor.a == 0.F)
         return;
 
@@ -443,7 +444,7 @@ static void renderOverviewWindowShadow(PHLMONITOR monitor, const PHLWINDOW& wind
 }
 
 static void renderOverviewWindowBorder(PHLMONITOR monitor, const PHLWINDOW& window, const CBox& windowBox, const SOverviewWindowMetrics& metrics, bool selected) {
-    if (!monitor || !window || (!window->m_isMapped && !window->m_fadingOut))
+    if (!monitor || !window || (!window->m_isMapped && !window->m_alpha.isBeingAnimated()))
         return;
 
     if (metrics.borderSize <= 0.F)
@@ -780,7 +781,7 @@ void renderOverviewWindow(const SRenderParams& params) {
     if (!params.window)
         return;
 
-    const bool                   fullscreen   = params.window->isFullscreen();
+    const bool                   fullscreen   = Fullscreen::controller()->isFullscreen(params.window);
     const SOverviewWindowMetrics metrics      = getOverviewWindowMetrics(params.monitor, params.window, params.renderScale);
 
     if (!fullscreen)

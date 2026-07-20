@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <hyprland/src/Compositor.hpp>
+#include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
@@ -34,7 +35,7 @@ typedef void (*origRenderWorkspace)(void*, PHLMONITOR, PHLWORKSPACE, const Time:
 typedef void (*origAddDamageA)(void*, const CBox&);
 typedef void (*origAddDamageB)(void*, const pixman_region32_t*);
 typedef void (*origDamageSurface)(void*, SP<CWLSurfaceResource>, double, double, double);
-typedef void (*origScheduleFrameForMonitor)(void*, PHLMONITOR, Aquamarine::IOutput::scheduleFrameReason);
+typedef void (*origScheduleFrameForMonitor)(void*, Aquamarine::IOutput::scheduleFrameReason);
 typedef void (*origSendFrameEventsToWorkspace)(void*, PHLMONITOR, PHLWORKSPACE, const Time::steady_tp&);
 typedef void (*origSurfaceFrame)(void*, const Time::steady_tp&);
 
@@ -92,8 +93,10 @@ void disableScrollOverviewHooks() {
     g_scrollOverviewHooksActive = false;
 }
 
-static void hkScheduleFrameForMonitor(void* thisptr, PHLMONITOR monitor, Aquamarine::IOutput::scheduleFrameReason reason) {
-    if (g_pScrollOverview && g_pScrollOverview->pMonitor == monitor) {
+static void hkScheduleFrameForMonitor(void* thisptr, Aquamarine::IOutput::scheduleFrameReason reason) {
+    const auto PMONITOR = sc<Monitor::CMonitor*>(thisptr);
+
+    if (g_pScrollOverview && PMONITOR && g_pScrollOverview->pMonitor == PMONITOR->m_self) {
         using enum Aquamarine::IOutput::scheduleFrameReason;
 
         const bool THROTTLEDREASON =
@@ -104,7 +107,7 @@ static void hkScheduleFrameForMonitor(void* thisptr, PHLMONITOR monitor, Aquamar
             return;
     }
 
-    rc<origScheduleFrameForMonitor>(g_pScrollScheduleFrameHook->m_original)(thisptr, monitor, reason);
+    rc<origScheduleFrameForMonitor>(g_pScrollScheduleFrameHook->m_original)(thisptr, reason);
 }
 
 //
@@ -145,7 +148,7 @@ static void hkSurfaceFrame(void* thisptr, const Time::steady_tp& now) {
 }
 
 static void hkAddDamageA(void* thisptr, const CBox& box) {
-    const auto PMONITOR = sc<CMonitor*>(thisptr);
+    const auto PMONITOR = sc<Monitor::CMonitor*>(thisptr);
 
     if (g_pScrollOverview && g_pScrollOverview->pMonitor == PMONITOR->m_self && renderingOverview && !damageFromSurface && g_pScrollOverview->shouldSuppressRenderDamage()) {
         return;
@@ -161,7 +164,7 @@ static void hkAddDamageA(void* thisptr, const CBox& box) {
 }
 
 static void hkAddDamageB(void* thisptr, const pixman_region32_t* rg) {
-    const auto PMONITOR = sc<CMonitor*>(thisptr);
+    const auto PMONITOR = sc<Monitor::CMonitor*>(thisptr);
 
     if (g_pScrollOverview && g_pScrollOverview->pMonitor == PMONITOR->m_self && renderingOverview && !damageFromSurface && g_pScrollOverview->shouldSuppressRenderDamage()) {
         return;
@@ -398,7 +401,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     g_pScrollScheduleFrameHook = HyprlandAPI::createFunctionHook(
         SCROLLOVERVIEW_HANDLE, 
-        findFnOrThrow("scheduleFrameForMonitor", {"CCompositor::scheduleFrameForMonitor("}),
+        findFnOrThrow("scheduleFrame", {"CMonitor::scheduleFrame("}),
         rc<void*>(hkScheduleFrameForMonitor));
 
     g_pScrollDamageSurfaceHook = HyprlandAPI::createFunctionHook(
@@ -423,7 +426,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     g_pScrollAddDamageHookA = HyprlandAPI::createFunctionHook(
         SCROLLOVERVIEW_HANDLE,
-        findFnOrThrow("_ZN8CMonitor9addDamageERKN9Hyprutils4Math4CBoxE", {""}),
+        findFnOrThrow("_ZN7Monitor8CMonitor9addDamageERKN9Hyprutils4Math4CBoxE", {""}),
         rc<void*>(hkAddDamageA));
 
     static auto P = Event::bus()->m_events.render.pre.listen([](PHLMONITOR monitor) {
