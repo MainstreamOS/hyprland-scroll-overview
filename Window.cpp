@@ -270,7 +270,7 @@ static std::optional<SDecorationPositioningReply> getOverviewTopStickyDecoration
     const float HEIGHT  = std::max(0.F, sc<float>(INFO.desiredExtents.topLeft.y) * heightScale);
     const float BORDER  = sc<float>(window->getRealBorderSize());
     const bool  PRECEDE = shouldOverviewBorderIncludeHyprbar(window);
-    const float WIDTH   = PRECEDE ? window->m_realSize->value().x : window->m_realSize->value().x + BORDER * 2.F;
+    const float WIDTH   = PRECEDE ? window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT).x : window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT).x + BORDER * 2.F;
     const float YOFFSET = PRECEDE ? 0.F : BORDER;
 
     return SDecorationPositioningReply{
@@ -318,8 +318,8 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
     ScrollOverview::Config::setValue("plugin:hyprbars:bar_text_size", std::max(1, sc<int>(std::round(previousBarTextSize * metrics.renderScale))));
     ScrollOverview::Config::setValue("plugin:hyprbars:bar_button_padding", std::max(0, sc<int>(std::round(previousButtonPadding * metrics.renderScale))));
 
-    const Vector2D previousWindowPos       = window->m_realPosition->value();
-    const Vector2D previousWindowSize      = window->m_realSize->value();
+    const Vector2D previousWindowPos       = window->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const Vector2D previousWindowSize      = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
     const auto     WORKSPACE               = window->m_workspace;
     const bool     OVERRIDEWORKSPACEOFFSET = WORKSPACE && !window->m_pinned;
     const Vector2D previousWorkspaceOffset = OVERRIDEWORKSPACEOFFSET ? WORKSPACE->m_renderOffset->value() : Vector2D{};
@@ -336,13 +336,13 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
     window->m_ruleApplicator->borderSize().set(scaledBorderSize, Desktop::Types::PRIORITY_SET_PROP);
     window->m_borderSizeCacheDirty = true;
 
-    window->m_realPosition->value() = monitor->m_position + windowBox.pos() / monitor->m_scale - window->m_floatingOffset;
-    window->m_realSize->value()     = windowBox.size() / monitor->m_scale;
+    window->positionAnimation()->value() = monitor->m_position + windowBox.pos() / monitor->m_scale - window->m_floatingOffset;
+    window->sizeAnimation()->value()     = windowBox.size() / monitor->m_scale;
 
     const auto REPLY = getOverviewTopStickyDecorationReply(decoration, window, metrics.renderScale);
     if (!REPLY) {
-        window->m_realPosition->value() = previousWindowPos;
-        window->m_realSize->value()     = previousWindowSize;
+        window->positionAnimation()->value() = previousWindowPos;
+        window->sizeAnimation()->value()     = previousWindowSize;
         ScrollOverview::Config::setValue("plugin:hyprbars:bar_text_size", previousBarTextSize);
         ScrollOverview::Config::setValue("plugin:hyprbars:bar_button_padding", previousButtonPadding);
         window->m_ruleApplicator->roundingOverride(previousRounding);
@@ -372,8 +372,8 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
         if (!window || !decoration)
             return;
 
-        window->m_realPosition->value() = previousWindowPos;
-        window->m_realSize->value()     = previousWindowSize;
+        window->positionAnimation()->value() = previousWindowPos;
+        window->sizeAnimation()->value()     = previousWindowSize;
         if (OVERRIDEWORKSPACEOFFSET && WORKSPACE)
             WORKSPACE->m_renderOffset->value() = previousWorkspaceOffset;
 
@@ -425,8 +425,8 @@ static void renderOverviewWindowShadow(PHLMONITOR monitor, const PHLWINDOW& wind
     if (shadowBox.width < 1 || shadowBox.height < 1)
         return;
 
-    const auto shadowColor = window->m_realShadowColor.m_colors.empty() ? CHyprColor{} : window->m_realShadowColor.m_colors.front();
-    if (shadowColor.a == 0.F)
+    const auto& shadowColor = window->m_realShadowColor;
+    if (std::ranges::none_of(shadowColor.m_colors, [](const CHyprColor& color) { return color.a > 0.F; }))
         return;
 
     g_pHyprRenderer->m_renderPass.add(makeUnique<COverviewShadowPassElement>(COverviewShadowPassElement::SData{
@@ -802,15 +802,15 @@ void renderOverviewWindow(const SRenderParams& params) {
     const bool     OVERRIDEWORKSPACEOFFSET = WORKSPACE && !params.window->m_pinned;
     const Vector2D previousWorkspaceOffset = OVERRIDEWORKSPACEOFFSET ? WORKSPACE->m_renderOffset->value() : Vector2D{};
 
-    params.window->m_realPosition->value() = params.monitor->m_position + params.windowBox.pos() / params.monitor->m_scale - params.window->m_floatingOffset;
-    params.window->m_realSize->value()     = params.windowBox.size() / params.monitor->m_scale;
+    params.window->positionAnimation()->value() = params.monitor->m_position + params.windowBox.pos() / params.monitor->m_scale - params.window->m_floatingOffset;
+    params.window->sizeAnimation()->value()     = params.windowBox.size() / params.monitor->m_scale;
     params.window->m_animatingIn           = true;
     if (OVERRIDEWORKSPACEOFFSET)
         WORKSPACE->m_renderOffset->value() = {};
 
     auto restoreWindowGeometry = Hyprutils::Utils::CScopeGuard([&] {
-        params.window->m_realPosition->value() = previousWindowPos;
-        params.window->m_realSize->value()     = previousWindowSize;
+        params.window->positionAnimation()->value() = previousWindowPos;
+        params.window->sizeAnimation()->value()     = previousWindowSize;
         params.window->m_animatingIn           = previousAnimatingIn;
         if (OVERRIDEWORKSPACEOFFSET && WORKSPACE)
             WORKSPACE->m_renderOffset->value() = previousWorkspaceOffset;

@@ -230,15 +230,16 @@ static bool windowHasOverviewAnimation(const PHLWINDOW& window) {
     if (!window)
         return false;
 
-    return window->m_realPosition->isBeingAnimated() || window->m_realSize->isBeingAnimated() || window->m_alpha.isBeingAnimated() ||
-        window->m_borderFadeAnimationProgress->isBeingAnimated() || window->m_borderAngleAnimationProgress->isBeingAnimated() || window->m_dimPercent->isBeingAnimated();
+    return window->positionAnimation()->isBeingAnimated() || window->sizeAnimation()->isBeingAnimated() || window->m_alpha.isBeingAnimated() ||
+        window->m_borderFadeAnimationProgress->isBeingAnimated() || window->m_borderAngleAnimationProgress->isBeingAnimated() || window->m_dimPercent->isBeingAnimated() ||
+        window->m_shadowFadeAnimationProgress->isBeingAnimated();
 }
 
 static bool layerHasOverviewAnimation(const PHLLS& layer) {
     if (!Desktop::View::validMapped(layer))
         return false;
 
-    return layer->m_realPosition->isBeingAnimated() || layer->m_realSize->isBeingAnimated() || layer->m_alpha[Desktop::View::LS_ALPHA_FADE]->isBeingAnimated();
+    return layer->positionAnimation()->isBeingAnimated() || layer->sizeAnimation()->isBeingAnimated() || layer->m_alpha.isBeingAnimated();
 }
 
 static Vector2D axisOffsetVector(float offset, ScrollOverview::Config::ELayout layout);
@@ -266,7 +267,7 @@ static CBox getOverviewWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, fl
     if (!window)
         return {};
 
-    return getOverviewGlobalBox({window->m_realPosition->value(), window->m_realSize->value()}, monitor, scale, viewOffset, offset, layout, round);
+    return getOverviewGlobalBox(window->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT), monitor, scale, viewOffset, offset, layout, round);
 }
 
 static CBox getOverviewDragWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float scale, const Vector2D& viewOffset, float offset, ScrollOverview::Config::ELayout layout,
@@ -501,14 +502,14 @@ static CBox getPinnedFloatingOverviewWindowBox(PHLMONITOR monitor, const PHLWIND
     }
 
     const auto MONITORSCALE = monitor->m_scale;
-    const auto WINDOWSIZE   = window->m_realSize->value() * MONITORSCALE;
+    const auto WINDOWSIZE   = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT) * MONITORSCALE;
     if (WINDOWSIZE.x <= 0 || WINDOWSIZE.y <= 0) {
         if (renderScale)
             *renderScale = 1.F;
         return {};
     }
 
-    const CBox WINDOWBOX = {(window->m_realPosition->value() - monitor->m_position) * MONITORSCALE, WINDOWSIZE};
+    const CBox WINDOWBOX = {(window->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) - monitor->m_position) * MONITORSCALE, WINDOWSIZE};
     const auto MONITORW  = sc<float>(monitor->m_size.x * MONITORSCALE);
     const auto MONITORH  = sc<float>(monitor->m_size.y * MONITORSCALE);
 
@@ -577,7 +578,7 @@ struct SOverviewShadowConfig {
     bool       enabled     = false;
     int        range       = 0;
     int        renderPower = 1;
-    CHyprColor color       = CHyprColor{0, 0, 0, 0};
+    Config::CGradientValueData color;
 };
 
 static SOverviewShadowConfig getOverviewShadowConfig() {
@@ -588,16 +589,19 @@ static SOverviewShadowConfig getOverviewShadowConfig() {
 
     const auto globalRange       = ScrollOverview::Config::getValue<int>("decoration:shadow:range");
     const auto globalRenderPower = ScrollOverview::Config::getValue<int>("decoration:shadow:render_power");
+    const auto globalColor       = ScrollOverview::Config::getValue<::Config::CGradientValueData>("decoration:shadow:color");
 
-    static CConfigValue<Config::IComplexConfigValue> globalColorValue("decoration:shadow:color");
-    const auto* GLOBALGRADIENT = dc<Config::CGradientValueData*>(globalColorValue.ptr());
-    const auto  globalColor    = GLOBALGRADIENT && !GLOBALGRADIENT->m_colors.empty() ? GLOBALGRADIENT->m_colors.front() : CHyprColor{0, 0, 0, 0};
+    Config::CGradientValueData shadowColor;
+    if (color && !color->m_colors.empty())
+        shadowColor = *color;
+    else if (!globalColor.m_colors.empty())
+        shadowColor = globalColor;
 
     return {
         .enabled      = !!enabled,
         .range        = std::max(0, range >= 0 ? range : globalRange),
         .renderPower  = std::clamp(renderPower >= 0 ? renderPower : globalRenderPower, 1, 4),
-        .color        = color >= 0 ? CHyprColor(sc<uint64_t>(color)) : globalColor,
+        .color        = shadowColor,
     };
 }
 
@@ -606,7 +610,8 @@ static void renderOverviewWorkspaceShadow(PHLMONITOR monitor, const CBox& worksp
         return;
 
     const auto SHADOW = getOverviewShadowConfig();
-    if (!SHADOW.enabled || SHADOW.range <= 0 || SHADOW.color.a == 0.F || alpha <= 0.F)
+    const bool HASVISIBLECOLOR = std::ranges::any_of(SHADOW.color.m_colors, [](const CHyprColor& color) { return color.a > 0.F; });
+    if (!SHADOW.enabled || SHADOW.range <= 0 || !HASVISIBLECOLOR || alpha <= 0.F)
         return;
 
     const int RANGE = sc<int>(std::round(SHADOW.range * monitor->m_scale * overviewScale));
@@ -644,10 +649,10 @@ static float getWindowVerticalOverlap(const PHLWINDOW& a, const PHLWINDOW& b) {
     if (!a || !b)
         return 0.F;
 
-    const auto APOS  = a->m_realPosition->value();
-    const auto ASIZE = a->m_realSize->value();
-    const auto BPOS  = b->m_realPosition->value();
-    const auto BSIZE = b->m_realSize->value();
+    const auto APOS  = a->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const auto ASIZE = a->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const auto BPOS  = b->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const auto BSIZE = b->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
 
     const double overlap = std::min(APOS.y + ASIZE.y, BPOS.y + BSIZE.y) - std::max(APOS.y, BPOS.y);
 
@@ -658,10 +663,10 @@ static float getWindowHorizontalOverlap(const PHLWINDOW& a, const PHLWINDOW& b) 
     if (!a || !b)
         return 0.F;
 
-    const auto APOS  = a->m_realPosition->value();
-    const auto ASIZE = a->m_realSize->value();
-    const auto BPOS  = b->m_realPosition->value();
-    const auto BSIZE = b->m_realSize->value();
+    const auto APOS  = a->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const auto ASIZE = a->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const auto BPOS  = b->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const auto BSIZE = b->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
 
     const double overlap = std::min(APOS.x + ASIZE.x, BPOS.x + BSIZE.x) - std::max(APOS.x, BPOS.x);
 
@@ -878,8 +883,8 @@ static void moveOverviewTargetNextToWindow(const SP<Layout::ITarget>& target, co
 
 CScrollOverview::~CScrollOverview() {
     restoreSubmapIfActive();
-    if (Render::GL::g_pHyprOpenGL)
-        Render::GL::g_pHyprOpenGL->makeEGLCurrent();
+    if (const auto OPENGL = g_pHyprRenderer ? g_pHyprRenderer->glBackend() : WP<Render::GL::CHyprOpenGLImpl>{})
+        OPENGL->makeEGLCurrent();
     if (realtimePreviewTimer) {
         wl_event_source_remove(realtimePreviewTimer);
         realtimePreviewTimer = nullptr;
@@ -1503,16 +1508,17 @@ static void renderOverviewLayerLevel(PHLMONITOR monitor, uint32_t layer, const C
             pushedRenderHints = true;
         }
 
+		auto& lsAlpha = LAYER->alpha()[Desktop::View::LS_ALPHA_FADE];
         float previousAlpha = 1.F;
-        if (MODULATEALPHA) {
-            previousAlpha = LAYER->m_alpha[Desktop::View::LS_ALPHA_FADE]->value();
-            LAYER->m_alpha[Desktop::View::LS_ALPHA_FADE]->setValueAndWarp(previousAlpha * std::clamp(alpha, 0.F, 1.F));
+        if (MODULATEALPHA && lsAlpha->value()) {
+            previousAlpha = lsAlpha->value();
+            lsAlpha->setValueAndWarp(previousAlpha * std::clamp(alpha, 0.F, 1.F));
         }
 
         g_pHyprRenderer->renderLayer(LAYER, monitor, now);
 
-        if (MODULATEALPHA)
-            LAYER->m_alpha[Desktop::View::LS_ALPHA_FADE]->setValueAndWarp(previousAlpha);
+        if (MODULATEALPHA && lsAlpha->value())
+            lsAlpha->setValueAndWarp(previousAlpha);
     }
 
     if (pushedRenderHints)
@@ -2018,8 +2024,8 @@ void CScrollOverview::updateWorkspaceOverflow() {
             if (!shouldShowOverviewWindow(window) || window->m_isFloating)
                 continue;
 
-            const auto POS  = window->m_realPosition->value() - MONITOR->m_position;
-            const auto SIZE = window->m_realSize->value();
+            const auto POS  = window->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) - MONITOR->m_position;
+            const auto SIZE = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
             // Windows hidden under a fullscreen window can get sentinel geometry like -2x-2.
             if (SIZE.x <= 0 || SIZE.y <= 0)
                 continue;
@@ -2629,7 +2635,7 @@ void CScrollOverview::beginWindowDrag(PHLWINDOW window) {
     dragOriginalTapeTranslation  = Vector2D{};
     dragOriginalWorkspace         = WINDOW->m_workspace;
     dragOriginalBox               = TARGET->position();
-    dragOriginalVisualBox         = WINDOW->m_group ? TARGET->position() : CBox{WINDOW->m_realPosition->value(), WINDOW->m_realSize->value()};
+    dragOriginalVisualBox         = WINDOW->m_group ? TARGET->position() : WINDOW->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
     dragOriginalOverviewBox       = CBox{};
     dragOriginalOverviewHitbox    = CBox{};
     dragActiveWindow              = WINDOW;
@@ -3117,7 +3123,6 @@ void CScrollOverview::endWindowDrag() {
     } else if (WINDOW && MOVEWORKSPACE) {
         Desktop::globalWindowController()->moveWindowToWorkspace(WINDOW, DROPWORKSPACE);
         RESTOREACTIVEWORKSPACE();
-
         if (TARGET) {
             const auto GLOBALSIZE = DRAGBOX.size() * (1.F / (std::max(scale->value(), 0.01F) * std::max(MONITOR ? MONITOR->m_scale : 1.F, 0.01F)));
             auto       GLOBALBOX  = dropWorkspaceFullyVisible ? CBox{overviewPointToGlobal(dropWorkspaceIdx, DRAGBOX.pos()), GLOBALSIZE} :
@@ -3580,7 +3585,7 @@ bool CScrollOverview::moveSelection(const std::string& direction) {
         }
     }
 
-    const bool WINDOWSELECTIONMOVED = !!bestCandidate;
+    const auto WINDOWSELECTIONMOVED = bestCandidate;
     if (!WINDOWSELECTIONMOVED)
         shouldMoveWorkspace = true;
 
@@ -3675,14 +3680,15 @@ void CScrollOverview::forceLayersAboveFullscreen() {
                 }
             }
 
+			auto& lsAlpha = ls->alpha()[Desktop::View::LS_ALPHA_FADE];
             if (!known)
-                forcedLayerVisibility.push_back({ls, ls->m_aboveFullscreen, ls->m_alpha[Desktop::View::LS_ALPHA_FADE]->value()});
+                forcedLayerVisibility.push_back({ls, ls->m_aboveFullscreen, lsAlpha->value()});
 
             if (!ls->m_aboveFullscreen)
                 ls->m_aboveFullscreen = true;
 
-            if (ls->m_alpha[Desktop::View::LS_ALPHA_FADE]->value() != 1.F || ls->m_alpha[Desktop::View::LS_ALPHA_FADE]->goal() != 1.F || ls->m_alpha[Desktop::View::LS_ALPHA_FADE]->isBeingAnimated())
-                ls->m_alpha[Desktop::View::LS_ALPHA_FADE]->setValueAndWarp(1.F);
+            if (lsAlpha->value() != 1.F || lsAlpha->goal() != 1.F || lsAlpha->isBeingAnimated())
+                lsAlpha->setValueAndWarp(1.F);
         }
     }
 }
@@ -3739,15 +3745,16 @@ void CScrollOverview::restoreForcedLayerVisibility() {
 
         entry.layer->m_aboveFullscreen = entry.aboveFullscreen;
 
+		auto& entryLsAlpha = entry.layer->alpha()[Desktop::View::LS_ALPHA_FADE];
         const auto MONITOR = entry.layer->m_monitor.lock();
         if (!MONITOR) {
-            entry.layer->m_alpha[Desktop::View::LS_ALPHA_FADE]->setValueAndWarp(entry.alpha);
+            entryLsAlpha->setValueAndWarp(entry.alpha);
             continue;
         }
 
         const bool fullscreen = Fullscreen::controller()->hasFullscreen(MONITOR);
         const bool visible    = !fullscreen || entry.layer->m_layer >= ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY || entry.layer->m_aboveFullscreen;
-        entry.layer->m_alpha[Desktop::View::LS_ALPHA_FADE]->setValueAndWarp(visible ? 1.F : 0.F);
+        entryLsAlpha->setValueAndWarp(visible ? 1.F : 0.F);
     }
 
     forcedLayerVisibility.clear();
@@ -3862,6 +3869,9 @@ void CScrollOverview::emitFullscreenVisibilityState(PHLWINDOW window, bool hideF
     if (emittingFullscreenVisibilityState)
         return;
 
+    emittingFullscreenVisibilityState = true;
+    auto resetEmittingFullscreenVisibilityState = Hyprutils::Utils::CScopeGuard([this] { emittingFullscreenVisibilityState = false; });
+
     window = getOverviewWindowToShow(window);
 
     if (!validMapped(window) || !window->m_workspace || window->m_monitor != pMonitor) {
@@ -3871,9 +3881,7 @@ void CScrollOverview::emitFullscreenVisibilityState(PHLWINDOW window, bool hideF
     }
 
     if (!hideFullscreen || !Fullscreen::controller()->isFullscreen(window)) {
-        emittingFullscreenVisibilityState = true;
         Event::bus()->m_events.window.fullscreen.emit(window);
-        emittingFullscreenVisibilityState = false;
 
         if (g_pEventManager)
             g_pEventManager->postEvent(SHyprIPCEvent{.event = "fullscreen", .data = Fullscreen::controller()->isFullscreen(window) ? "1" : "0"});
@@ -3881,12 +3889,16 @@ void CScrollOverview::emitFullscreenVisibilityState(PHLWINDOW window, bool hideF
         return;
     }
 
-    emittingFullscreenVisibilityState = true;
+    const auto SAVEDMODES = Fullscreen::controller()->getFullscreenModes(window);
+
+    Fullscreen::controller()->setFullscreenMode(window, Fullscreen::FSMODE_NONE, Fullscreen::FSMODE_NONE);
+
     Event::bus()->m_events.window.fullscreen.emit(window);
-    emittingFullscreenVisibilityState = false;
 
     if (g_pEventManager)
         g_pEventManager->postEvent(SHyprIPCEvent{.event = "fullscreen", .data = "0"});
+
+    Fullscreen::controller()->setFullscreenMode(window, SAVEDMODES.internal, SAVEDMODES.client);
 }
 
 static PHLWINDOW getOverviewFullscreenVisibilityWindow(const PHLWORKSPACE& workspace, const PHLWINDOW& fallback) {

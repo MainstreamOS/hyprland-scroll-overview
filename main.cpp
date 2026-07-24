@@ -148,7 +148,7 @@ static void hkSurfaceFrame(void* thisptr, const Time::steady_tp& now) {
 }
 
 static void hkAddDamageA(void* thisptr, const CBox& box) {
-    const auto PMONITOR = sc<Monitor::CMonitor*>(thisptr);
+    const auto PMONITOR = sc<Monitor::CMonitor*>( thisptr );
 
     if (g_pScrollOverview && g_pScrollOverview->pMonitor == PMONITOR->m_self && renderingOverview && !damageFromSurface && g_pScrollOverview->shouldSuppressRenderDamage()) {
         return;
@@ -401,7 +401,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     g_pScrollScheduleFrameHook = HyprlandAPI::createFunctionHook(
         SCROLLOVERVIEW_HANDLE, 
-        findFnOrThrow("scheduleFrame", {"CMonitor::scheduleFrame("}),
+        findFnOrThrow("_ZN7Monitor8CMonitor13scheduleFrameEN10Aquamarine7IOutput19scheduleFrameReasonE", {""}),
         rc<void*>(hkScheduleFrameForMonitor));
 
     g_pScrollDamageSurfaceHook = HyprlandAPI::createFunctionHook(
@@ -441,7 +441,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     ScrollOverview::Config::registerGesture(::onRegisterOverviewGesture, ::overviewGestureKeyword);
     ScrollOverview::Config::registerConfig();
 
-    return {"scrolloverview", "A plugin for an overview", "Vaxry, yayuuu", "1.0"};
+    return {"scrolloverview", "A plugin for an overview", "Vaxry, yayuuu", "1.1"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
