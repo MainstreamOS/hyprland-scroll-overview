@@ -28,11 +28,12 @@ struct wl_event_source;
 
 class CScrollOverview : public IOverview {
   public:
-    CScrollOverview(PHLWORKSPACE startedOn_, bool swipe = false);
+    CScrollOverview(PHLWORKSPACE startedOn_, bool swipe = false, PHLMONITOR monitor = {});
     ~CScrollOverview() override;
 
     void         render() override;
     void         damage() override;
+    void         requestInputFrame() override;
     void         markBlurDirty();
     void         markBackdropBlurDirty();
     void         onDamageReported() override;
@@ -50,6 +51,8 @@ class CScrollOverview : public IOverview {
 
     // close without a selection
     void         close() override;
+    bool         isClosing() const override;
+    void         reopen() override;
     void         selectHoveredWorkspace() override;
     bool         moveSelection(const std::string& direction) override;
     bool         windowDispatcherAction(const std::string& action) override;
@@ -80,6 +83,7 @@ class CScrollOverview : public IOverview {
     bool   scrollStepAllowed(uint32_t timeMs);
     bool   selectOverviewWindow(PHLWINDOW window, size_t workspaceIdx, bool syncFocus = false);
     bool   selectWindowAtOverviewCursor(bool syncFocus = false);
+    PHLWINDOW windowClosestToWorkspaceCenter(size_t workspaceIdx) const;
     void   rememberSelection(PHLWINDOW window);
     void   syncSelectionToViewport();
     void   syncFocusedSelection();
@@ -92,12 +96,15 @@ class CScrollOverview : public IOverview {
     PHLWINDOW windowAtOverviewPoint(const Vector2D& point, size_t* workspaceIdx = nullptr) const;
     PHLWINDOW windowAtOverviewCursor(size_t* workspaceIdx = nullptr);
     PHLWINDOW windowAtOverviewCursorOnWorkspace(size_t workspaceIdx, const PHLWINDOW& ignoredWindow = nullptr, CBox* windowBox = nullptr) const;
-    CDropIndicator::SDropAnchor dropAnchorAtOverviewCursorOnWorkspace(size_t workspaceIdx, const PHLWINDOW& ignoredWindow = nullptr);
+    CDropIndicator::SDropAnchor dropAnchorAtOverviewCursorOnWorkspace(size_t workspaceIdx, const PHLWINDOW& ignoredWindow = nullptr,
+                                                                      CScrollOverview* dragContext = nullptr);
     PHLWORKSPACE workspaceAtOverviewPoint(const Vector2D& point, size_t* workspaceIdx = nullptr) const;
     PHLWORKSPACE workspaceAtOverviewDropPoint(const Vector2D& point, size_t* workspaceIdx = nullptr, const PHLWINDOW& draggedWindow = nullptr) const;
     PHLWORKSPACE workspaceAtOverviewCursor(size_t* workspaceIdx = nullptr) const;
     Vector2D  overviewPointToGlobal(size_t workspaceIdx, const Vector2D& pointLocal) const;
     CBox      draggedWindowBox(size_t workspaceIdx) const;
+    CBox      draggedWindowBoxFor(PHLWINDOW window, size_t workspaceIdx, const Vector2D& pointLocal, const Vector2D& grabRatio) const;
+    CBox      draggedWindowGlobalBox() const;
     void      refreshDragOriginalOverviewBoxes();
     void      clearDragPending();
     void      beginWindowDrag(PHLWINDOW window);
@@ -127,7 +134,9 @@ class CScrollOverview : public IOverview {
     void   emitFullscreenVisibilityState(PHLWINDOW window, bool hideFullscreen);
     void   applyInputConfigOverrides();
     void   restoreInputConfigOverrides();
+    void   transferSharedStateOwnership();
     size_t activeWorkspaceIndex() const;
+    bool   isSelectedWorkspace(const PHLWORKSPACE& workspace) const;
     void   sendOverviewFrameCallbacks(const Time::steady_tp& now);
     bool   isVisibleRealtimePreviewWindow(const PHLWINDOW& window) const;
     bool   hasRunningWorkspaceAnimation() const;
@@ -139,7 +148,6 @@ class CScrollOverview : public IOverview {
     void   activateSubmapIfConfigured();
     void   restoreSubmapIfActive();
     bool   dispatchSubmapMouseClick(uint32_t button);
-    void   requestInputFrame();
     static int realtimePreviewTimerCallback(void* data);
 
     size_t viewportCurrentWorkspace = 0;
@@ -182,6 +190,7 @@ class CScrollOverview : public IOverview {
 
     Vector2D                         dragStartMouseLocal   = Vector2D{};
     Vector2D                         dragGrabOffsetLocal   = Vector2D{};
+    Vector2D                         dragGrabRatio         = Vector2D{0.5, 0.5};
     Vector2D                         dragOriginalFloatSize = Vector2D{};
     Vector2D                         dragOriginalTapeTranslation = Vector2D{};
     Vector2D                         resizeStartMouseLocal = Vector2D{};
@@ -204,6 +213,7 @@ class CScrollOverview : public IOverview {
     bool                             inputConfigOverridden = false;
     bool                             realtimePreviewTimerArmed = false;
     bool                             realtimePreviewFrameQueued = false;
+    bool                             selectedWorkspaceFramePending = false;
     bool                             inputFramePending = false;
     bool                             sendingOverviewFrameCallbacks = false;
     bool                             usesSubmapKeybinds = false;
@@ -248,6 +258,7 @@ class CScrollOverview : public IOverview {
     };
     std::vector<SWorkspaceAnimationConfig> savedWorkspaceAnimationConfigs;
     bool                                   workspaceAnimationsOverridden = false;
+    bool                                   sharedStateOwner = false;
 
     PHLWORKSPACE                     startedOn;
 

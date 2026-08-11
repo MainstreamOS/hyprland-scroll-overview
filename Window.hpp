@@ -19,6 +19,7 @@ struct SRenderParams {
     const CBox*           workspaceBox         = nullptr;
     bool                  selected             = false;
     bool                  dragged              = false;
+    PHLWINDOW             pseudoFocusWindow;
 };
 
 void renderOverviewWindow(const SRenderParams& params);
