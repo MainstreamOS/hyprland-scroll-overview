@@ -1851,7 +1851,13 @@ void CScrollOverview::renderGlobalWallpaper(PHLMONITOR monitor, const Time::stea
         const SP<Render::ITexture> TEX = (WANTBLUR && m_customWallpaperBlurredTex) ? m_customWallpaperBlurredTex : m_customWallpaperTex;
         if (TEX && TEX->m_size.x > 0 && TEX->m_size.y > 0) {
             // Cover-fit: fill the monitor preserving aspect ratio, centered.
-            const Vector2D MSIZE        = monitor->m_pixelSize;
+            //
+            // The transformed size, because that is the space this pass draws
+            // in (see OverviewRender::flushPass). A quarter-turned output has
+            // its axes exchanged there while the panel's own mode does not, so
+            // fitting to the mode would size the picture for a landscape screen
+            // and then paint it onto a portrait one.
+            const Vector2D MSIZE        = monitor->m_transformedSize;
             const Vector2D TSIZE        = TEX->m_size;
             const float    COVERSCALE   = std::max(MSIZE.x / TSIZE.x, MSIZE.y / TSIZE.y);
             const Vector2D RENDEREDSIZE = TSIZE * COVERSCALE;
