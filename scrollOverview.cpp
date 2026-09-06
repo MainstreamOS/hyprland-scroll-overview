@@ -1447,8 +1447,9 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
 
         info.cancelled = true;
 
-        const auto ACTION = e.axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? ScrollOverview::Config::getHorizontalScrollAction(layout) :
-                                                                          ScrollOverview::Config::getVerticalScrollAction(layout);
+        const bool WHEEL  = e.source == WL_POINTER_AXIS_SOURCE_WHEEL;
+        const auto ACTION = e.axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? ScrollOverview::Config::getHorizontalScrollAction(layout, WHEEL) :
+                                                                          ScrollOverview::Config::getVerticalScrollAction(layout, WHEEL);
 
         // mouse wheel: discrete stepping, throttled by scroll_event_delay so one notch is one step
         if (e.source == WL_POINTER_AXIS_SOURCE_WHEEL) {

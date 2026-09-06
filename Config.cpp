@@ -353,24 +353,30 @@ float getTouchpadScrollFactor() {
         std::max<float>(0.F, getValue<float>("plugin:scrolloverview:input:touchpad_scroll_factor"));
 }
 
-static EScrollAction defaultVerticalScrollAction(ELayout layout) {
+// A mouse wheel has one axis worth turning, so its notches change workspaces in either
+// layout. Continuous sources (a touchpad, a trackpoint) follow the layout axis instead,
+// since the view tracks their motion one to one.
+static EScrollAction defaultVerticalScrollAction(ELayout layout, bool wheel) {
+    if (wheel)
+        return EScrollAction::WORKSPACE;
+
     return layout == ELayout::HORIZONTAL ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
 }
 
-EScrollAction getVerticalScrollAction(ELayout layout) {
+EScrollAction getVerticalScrollAction(ELayout layout, bool wheel) {
     const auto MODE = std::clamp(getValue<int>("plugin:scrolloverview:input:scrolling_mode"), 0, 3);
 
     switch (MODE) {
-        case 1: return defaultVerticalScrollAction(layout) == EScrollAction::WORKSPACE ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
+        case 1: return defaultVerticalScrollAction(layout, wheel) == EScrollAction::WORKSPACE ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
         case 2: return EScrollAction::WORKSPACE;
         case 3: return EScrollAction::COLUMN;
         case 0:
-        default: return defaultVerticalScrollAction(layout);
+        default: return defaultVerticalScrollAction(layout, wheel);
     }
 }
 
-EScrollAction getHorizontalScrollAction(ELayout layout) {
-    return getVerticalScrollAction(layout) == EScrollAction::WORKSPACE ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
+EScrollAction getHorizontalScrollAction(ELayout layout, bool wheel) {
+    return getVerticalScrollAction(layout, wheel) == EScrollAction::WORKSPACE ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
 }
 
 int getScrollEventDelay() {

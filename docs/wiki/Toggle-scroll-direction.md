@@ -1,4 +1,4 @@
-The `scrolling_mode` option can be changed at runtime. This example uses the normal, layout-aware mode by default (for example scrolling changes workspace) and switches to the inverted mode while either Shift key is held (to scrolling through the columns within a workspace). Releasing Shift restores the original scrolling behavior.
+The `scrolling_mode` option can be changed at runtime. This example uses the default mode (the mouse wheel changes workspace) and switches to the inverted mode while either Shift key is held (to scroll through the columns within a workspace). Releasing Shift restores the original scrolling behavior.
 
 Add the following state and helper functions to your Lua configuration:
 

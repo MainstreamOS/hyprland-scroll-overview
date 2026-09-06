@@ -50,7 +50,7 @@ ScrollOverview respects Hyprland's global `input.left_handed` and `input.touchpa
 | left_handed | int | swap left and right mouse button actions in overview: `0` disabled, `1` enabled | `input.left_handed` |
 | scroll_event_delay | number | in ms, delay between scroll events (to prevent multiple activation) | `200` |
 | touchpad_scroll_factor | float | overview touchpad workspace scroll distance multiplier | `1` |
-| scrolling_mode | int | mouse wheel behavior: `0` layout-aware default, `1` inverted, `2` vertical scroll changes workspace and horizontal scroll changes columns, `3` vertical scroll changes columns and horizontal scroll changes workspace | `0` |
+| scrolling_mode | int | scroll behavior. `0` default: a mouse wheel changes workspace vertically and columns horizontally in either layout, while a touchpad changes workspace along the layout axis (vertical swipes in the `vertical` layout, horizontal swipes in the `horizontal` layout) and columns along the other. `1` inverts the default. `2` vertical scroll changes workspace and horizontal scroll changes columns for every input. `3` vertical scroll changes columns and horizontal scroll changes workspace for every input | `0` |
 | drag_mode | int | mouse drag behavior: `0` main button drags windows and middle button pans scrolling workspaces, `1` main button pans scrolling workspaces and middle button drags windows | `0` |
 | drag_threshold | int | movement threshold in pixels before a mouse press becomes drag/pan/resize instead of click; `0` disables the threshold | `10` |
 
