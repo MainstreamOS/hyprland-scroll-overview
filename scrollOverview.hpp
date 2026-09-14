@@ -51,6 +51,7 @@ class CScrollOverview : public IOverview {
 
     // close without a selection
     void         close() override;
+    void         dismissTransient() override;
     bool         isClosing() const override;
     void         reopen() override;
     void         selectHoveredWorkspace() override;
@@ -58,8 +59,27 @@ class CScrollOverview : public IOverview {
     bool         windowDispatcherAction(const std::string& action) override;
 
     void         fullRender() override;
+    bool         adoptNativeWindowDrag(PHLWINDOW expectedWindow = {});
 
   private:
+    enum class ECloseMode {
+        COMMIT_SELECTION,
+        PRESERVE_MONITOR_STATE,
+    };
+
+    struct SWindowDragSnapshot {
+        PHLWINDOW    window;
+        PHLWORKSPACE workspace;
+        CBox         box;
+        CBox         visualBox;
+        Vector2D     floatSize;
+        Vector2D     tapeTranslation;
+        Vector2D     grabOffsetLocal;
+        Vector2D     grabRatio = Vector2D{0.5, 0.5};
+        bool         startedTiled = false;
+    };
+
+    void       close(ECloseMode mode);
     void   rebuildWorkspaceImages();
     void   seedRememberedSelections();
     void   redrawAll(bool forcelowres = false);
@@ -106,10 +126,16 @@ class CScrollOverview : public IOverview {
     CBox      draggedWindowBoxFor(PHLWINDOW window, size_t workspaceIdx, const Vector2D& pointLocal, const Vector2D& grabRatio) const;
     CBox      draggedWindowGlobalBox() const;
     void      refreshDragOriginalOverviewBoxes();
-    void      clearDragPending();
-    void      beginWindowDrag(PHLWINDOW window);
-    void      updateWindowDrag();
-    void      endWindowDrag();
+    void                        clearDragPending();
+    void                        beginWindowDrag(PHLWINDOW window);
+    std::optional<SWindowDragSnapshot> snapshotNativeWindowDrag(Layout::Supplementary::CDragStateController* dragController,
+                                                                 PHLWINDOW expectedWindow) const;
+    void initializeWindowDrag(const SWindowDragSnapshot& snapshot, bool adoptedFromNative, bool crossMonitorDrag);
+    void                        ensureDragDestinationOverview();
+    void                        updateWindowDrag();
+    void                        endWindowDrag();
+    void                        finishWindowDragSession(const SP<IOverview>& persistentDestination = {});
+    void                        cancelWindowDrag();
     CBox      resizedWindowBox() const;
     void      beginWindowResize();
     void      updateWindowResize();
@@ -183,6 +209,7 @@ class CScrollOverview : public IOverview {
     PHLWINDOWREF                     closeOnWindow;
     PHLWINDOWREF                     dragActiveWindow;
     PHLWORKSPACEREF                  dragOriginalWorkspace;
+    std::vector<WP<IOverview>>                    dragTransientOverviews;
     PHLWORKSPACEREF                  scrollingPanWorkspace;
     PHLWINDOWREF                     scrollingPanInitialWindow;
     PHLWINDOWREF                     resizePendingWindow;
@@ -205,10 +232,13 @@ class CScrollOverview : public IOverview {
     size_t                           resizeWorkspaceIdx     = 0;
     Layout::eRectCorner              resizeCorner           = Layout::CORNER_NONE;
     bool                             dragPendingPrimary    = false;
+    bool                                          dragCancelledAwaitingRelease      = false;
     bool                             resizePointerDown     = false;
     bool                             scrollingPanPointerDown = false;
     bool                             submapMouseClickPending = false;
     bool                             dragStartedTiled      = false;
+    bool                             dragAdoptedFromNative = false;
+    bool                             dragCrossMonitor      = false;
     bool                             emittingFullscreenVisibilityState = false;
     bool                             inputConfigOverridden = false;
     bool                             realtimePreviewTimerArmed = false;
@@ -281,6 +311,7 @@ class CScrollOverview : public IOverview {
 
     bool                             closing = false;
     bool                             closeApplied = false; // close() has run its teardown; guards against double-invocation
+    bool                                               closeRemovalPending = false;
 
     CHyprSignalListener             mouseMoveHook;
     CHyprSignalListener             mouseButtonHook;
@@ -293,6 +324,7 @@ class CScrollOverview : public IOverview {
     CHyprSignalListener             windowActiveHook;
     CHyprSignalListener             windowFullscreenHook;
     CHyprSignalListener             keyboardKeyHook;
+    CHyprSignalListener                                dragKeyboardKeyHook;
     CHyprSignalListener             workspaceCreatedHook;
     CHyprSignalListener             workspaceRemovedHook;
 
