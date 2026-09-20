@@ -107,8 +107,20 @@ static void releaseTopLayerPointerButtons(uint32_t timeMs) {
     g_pSeatManager->sendPointerFrame();
 }
 
-static void removeOverview(CScrollOverview* overview) {
-    const auto PMONITOR = overview ? overview->pMonitor.lock() : PHLMONITOR{};
+void removeOverview(IOverview* overview_) {
+    auto* overview = dynamic_cast<CScrollOverview*>(overview_);
+    if (!overview || !overview->closing || !overview->closeRemovalPending)
+        return;
+
+    overview->closeRemovalPending = false;
+    overview->scale->setCallbackOnEnd({});
+    if (overview->closeRemovalIdle) {
+        wl_event_source_remove(overview->closeRemovalIdle);
+        overview->closeRemovalIdle = nullptr;
+    }
+    overview->releaseInputListeners();
+
+    const auto PMONITOR = overview->pMonitor.lock();
     unregisterScrollOverview(overview);
     if (scrollOverviews().empty())
         disableScrollOverviewHooks();
@@ -949,6 +961,8 @@ static void moveOverviewTargetNextToWindow(const SP<Layout::ITarget>& target, co
 }
 
 CScrollOverview::~CScrollOverview() {
+    if (closeRemovalIdle)
+        wl_event_source_remove(closeRemovalIdle);
     cancelWindowDrag();
     if (g_pointerGrabOverview == this)
         g_pointerGrabOverview = nullptr;
@@ -1168,11 +1182,12 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         const bool RELEASESPOINTERGRAB = event.state == WL_POINTER_BUTTON_STATE_RELEASED;
         auto       releasePointerGrab  = Hyprutils::Utils::CScopeGuard([this, RELEASESPOINTERGRAB] {
             if (RELEASESPOINTERGRAB && g_pointerGrabOverview == this) {
-                if (dragCancelledAwaitingRelease && closing && closeRemovalPending && !scale->isBeingAnimated())
-                    wl_event_loop_add_idle(
+                if (dragCancelledAwaitingRelease && closing && closeRemovalPending && !scale->isBeingAnimated() && !closeRemovalIdle)
+                    closeRemovalIdle = wl_event_loop_add_idle(
                         g_pCompositor->m_wlEventLoop,
                         [](void* data) {
                             auto* const overview = sc<CScrollOverview*>(data);
+                            overview->closeRemovalIdle = nullptr;
                             if (overview->closing && overview->closeRemovalPending && !overview->dragCancelledAwaitingRelease)
                                 removeOverview(overview);
                         },

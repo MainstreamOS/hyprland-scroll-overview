@@ -7,6 +7,7 @@
 #include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
+#include <hyprland/src/config/shared/actions/ConfigActions.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/KeybindManager.hpp>
@@ -37,6 +38,7 @@ static CFunctionHook* g_pScrollScheduleFrameHook   = nullptr;
 static CFunctionHook* g_pScrollSendFrameEventsHook = nullptr;
 static CFunctionHook* g_pScrollSurfaceFrameHook    = nullptr;
 static CFunctionHook* g_pScrollMoveMouseHook       = nullptr;
+static CFunctionHook* g_pScrollChangeWorkspaceHook = nullptr;
 typedef void (*origRenderWorkspace)(void*, PHLMONITOR, PHLWORKSPACE, const Time::steady_tp&, const CBox&);
 typedef void (*origAddDamageA)(void*, const CBox&);
 typedef void (*origAddDamageB)(void*, const pixman_region32_t*);
@@ -45,6 +47,7 @@ typedef void (*origScheduleFrame)(void*, Aquamarine::IOutput::scheduleFrameReaso
 typedef void (*origSendFrameEventsToWorkspace)(void*, PHLMONITOR, PHLWORKSPACE, const Time::steady_tp&);
 typedef void (*origSurfaceFrame)(void*, const Time::steady_tp&);
 typedef void (*origMoveMouse)(void*, const Vector2D&);
+using origChangeWorkspace = Config::Actions::ActionResult (*)(PHLWORKSPACE);
 
 static bool g_unloading = false;
 
@@ -66,6 +69,16 @@ static void failNotif(const std::string& reason);
 static void warnNativeDragUnavailable();
 static void disableNativeDragHook();
 static void reconcileNativeDragHook();
+
+static Config::Actions::ActionResult hkChangeWorkspace(PHLWORKSPACE workspace) {
+    if (workspace && !g_unloading) {
+        const auto overviews = scrollOverviews();
+        for (const auto& overview : overviews)
+            removeOverview(overview.get());
+    }
+
+    return rc<origChangeWorkspace>(g_pScrollChangeWorkspaceHook->m_original)(workspace);
+}
 
 bool ensureScrollOverviewHooks() {
     if (g_scrollOverviewHooksActive)
@@ -654,6 +667,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         findFnOrThrow("_ZN7Monitor8CMonitor9addDamageERKN9Hyprutils4Math4CBoxE", {""}),
         rc<void*>(hkAddDamageA));
 
+    // Keep this hook until plugin unload: finishing the last overview disables the
+    // rendering hooks inside hkChangeWorkspace, which still needs its original function.
+    g_pScrollChangeWorkspaceHook = HyprlandAPI::createFunctionHook(
+        SCROLLOVERVIEW_HANDLE,
+        findFnOrThrow("changeWorkspace", {"Config::Actions::changeWorkspace(Hyprutils::Memory::CSharedPointer<CWorkspace>"}),
+        rc<void*>(hkChangeWorkspace));
+    if (!g_pScrollChangeWorkspaceHook || !g_pScrollChangeWorkspaceHook->hook()) {
+        failNotif("Failed enabling workspace change hook");
+        throw std::runtime_error("[scrolloverview] Failed enabling workspace change hook");
+    }
+
     static auto P = Event::bus()->m_events.render.pre.listen([](PHLMONITOR monitor) {
         if (const auto overview = scrollOverviewForMonitor(monitor))
             overview->onPreRender();
@@ -675,6 +699,8 @@ APICALL EXPORT void PLUGIN_EXIT() {
 
     g_unloading = true;
     g_configReloadHook.reset();
+    if (g_pScrollChangeWorkspaceHook)
+        g_pScrollChangeWorkspaceHook->unhook();
     clearScrollOverviews();
     disableScrollOverviewHooks();
 
