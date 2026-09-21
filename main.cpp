@@ -64,6 +64,7 @@ static bool                g_scrollMoveMouseHookActive      = false;
 static bool                g_scrollMoveMouseHookUnavailable = false;
 static bool                g_scrollMoveMouseHookWarned      = false;
 static CHyprSignalListener g_configReloadHook;
+static CHyprSignalListener g_nativeDragMouseMoveHook;
 
 static void failNotif(const std::string& reason);
 static void warnNativeDragUnavailable();
@@ -126,8 +127,9 @@ void disableScrollOverviewHooks() {
 static void hkMoveMouse(void* thisptr, const Vector2D& mousePos) {
     rc<origMoveMouse>(g_pScrollMoveMouseHook->m_original)(thisptr, mousePos);
 
-    // moveMouse() updates dragThresholdReached().
-    if (!g_unloading && g_scrollMoveMouseHookActive && ScrollOverview::Config::getCrossMonitorDrag()) {
+    // Catch a drag that crossed the threshold during this native motion. The
+    // early mouse listener handles drags whose threshold was already reached.
+    if (!g_unloading && g_scrollMoveMouseHookActive) {
         try {
             adoptNativeWindowDragIntoOverview();
         } catch (...) {
@@ -273,7 +275,7 @@ static SP<IOverview> dispatcherOverview() {
 }
 
 bool adoptNativeWindowDragIntoOverview() {
-    if (!ScrollOverview::Config::getCrossMonitorDrag() || scrollOverviews().empty() || !g_layoutManager || !g_pInputManager)
+    if (scrollOverviews().empty() || !g_layoutManager || !g_pInputManager)
         return false;
 
     const auto& DRAGCONTROLLER = g_layoutManager->dragController();
@@ -284,7 +286,7 @@ bool adoptNativeWindowDragIntoOverview() {
 
     const auto SOURCEWORKSPACE = TARGET->workspace();
     const auto SOURCEMONITOR   = SOURCEWORKSPACE ? SOURCEWORKSPACE->m_monitor.lock() : WINDOW->m_monitor.lock();
-    if (!SOURCEMONITOR || !SOURCEMONITOR->m_enabled)
+    if (!SOURCEMONITOR || !SOURCEMONITOR->m_enabled || !ScrollOverview::Config::getCrossMonitorDrag(SOURCEMONITOR))
         return false;
 
     auto        result   = openOverview(SOURCEMONITOR);
@@ -420,7 +422,7 @@ static void warnNativeDragUnavailable() {
     g_scrollMoveMouseHookWarned = true;
     HyprlandAPI::addNotification(
         SCROLLOVERVIEW_HANDLE,
-        "[scrolloverview] cross-monitor drag is enabled, but Hyprland drag adoption is unavailable; overview-origin cross-monitor dragging remains available",
+        "[scrolloverview] native drag post-motion hook is unavailable; adoption will be retried on the next mouse event",
         CHyprColor{1.0, 0.75, 0.2, 1.0}, 7500);
 }
 
@@ -449,7 +451,7 @@ static void* findOptionalFn(const std::string& name, const std::string_view dema
 }
 
 static void reconcileNativeDragHook() {
-    const bool REQUESTED = !g_unloading && g_scrollOverviewHooksActive && !scrollOverviews().empty() && ScrollOverview::Config::getCrossMonitorDrag();
+    const bool REQUESTED = !g_unloading && g_scrollOverviewHooksActive && !scrollOverviews().empty() && ScrollOverview::Config::hasCrossMonitorDragEnabled();
 
     if (!REQUESTED) {
         disableNativeDragHook();
@@ -685,6 +687,18 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     g_configReloadHook = Event::bus()->m_events.config.reloaded.listen([] { reconcileNativeDragHook(); });
 
+    g_nativeDragMouseMoveHook = Event::bus()->m_events.input.mouse.move.listen([](Vector2D, Event::SCallbackInfo& info) {
+        if (info.cancelled || g_unloading || scrollOverviews().empty())
+            return;
+
+        try {
+            if (adoptNativeWindowDragIntoOverview())
+                info.cancelled = true;
+        } catch (...) {
+            // Keep native input working if adoption could not be completed.
+        }
+    });
+
     ScrollOverview::Config::registerDispatcher("overview", ::onOverviewDispatcher);
     ScrollOverview::Config::registerDispatcher("navigate", ::onNavigateDispatcher);
     ScrollOverview::Config::registerDispatcher("window", ::onWindowDispatcher);
@@ -698,6 +712,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_pHyprRenderer->m_renderPass.removeAllOfType("CScrollOverviewPassElement");
 
     g_unloading = true;
+    g_nativeDragMouseMoveHook.reset();
     g_configReloadHook.reset();
     if (g_pScrollChangeWorkspaceHook)
         g_pScrollChangeWorkspaceHook->unhook();
