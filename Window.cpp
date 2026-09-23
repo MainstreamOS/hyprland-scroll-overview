@@ -3,6 +3,7 @@
 #include <cmath>
 #include <dlfcn.h>
 #include <functional>
+#include <memory>
 #define private public
 #define protected public
 #include <hyprland/src/render/Renderer.hpp>
@@ -284,6 +285,22 @@ static SHyprbarGlobalStateMirror* getOverviewHyprbarGlobalState() {
     const auto STATEPTR = sc<UP<SHyprbarGlobalStateMirror>*>(symbol);
     if (!STATEPTR || !STATEPTR->get())
         return nullptr;
+
+    // The mirror is only safe while hyprbars lays its buttons out the same way;
+    // a button struct that has grown makes every read and write here land in the
+    // wrong place, and the miscounted list aborts the compositor. A hyprbars
+    // that publishes its button size is taken at its word. For one that does
+    // not, the list has to span a whole number of mirrored buttons, and a sane
+    // count of them, before anything touches it.
+    if (const auto* const BUTTONSIZE = sc<const size_t*>(dlsym(hyprbarsHandle, "g_hyprbarsButtonSize"))) {
+        if (*BUTTONSIZE != sizeof(SHyprbarButtonMirror))
+            return nullptr;
+    } else {
+        const auto&     BUTTONS = STATEPTR->get()->buttons;
+        const ptrdiff_t BYTES   = reinterpret_cast<const char*>(std::to_address(BUTTONS.end())) - reinterpret_cast<const char*>(BUTTONS.data());
+        if (BYTES < 0 || sc<size_t>(BYTES) % sizeof(SHyprbarButtonMirror) != 0 || sc<size_t>(BYTES) / sizeof(SHyprbarButtonMirror) > 32)
+            return nullptr;
+    }
 
     return STATEPTR->get();
 }
