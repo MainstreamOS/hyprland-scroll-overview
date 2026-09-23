@@ -308,6 +308,7 @@ class CScrollOverview : public IOverview {
     Time::steady_tp                  lastRealtimePreviewFrame = {};
     Time::steady_tp                  realtimePreviewTimerDue = {};
     wl_event_source*                 realtimePreviewTimer = nullptr;
+    wl_event_source*                 closeRemovalIdle = nullptr;
 
     bool                             closing = false;
     bool                             closeApplied = false; // close() has run its teardown; guards against double-invocation
@@ -345,4 +346,5 @@ class CScrollOverview : public IOverview {
     double                           trackpadGestureSettleOffset  = 0.0;
 
     friend class CScrollOverviewPassElement;
+    friend void removeOverview(IOverview* overview);
 };

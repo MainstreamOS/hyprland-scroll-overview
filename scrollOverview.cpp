@@ -117,8 +117,20 @@ static void releaseTopLayerPointerButtons(uint32_t timeMs) {
     g_pSeatManager->sendPointerFrame();
 }
 
-static void removeOverview(CScrollOverview* overview) {
-    const auto PMONITOR = overview ? overview->pMonitor.lock() : PHLMONITOR{};
+void removeOverview(IOverview* overview_) {
+    auto* overview = dynamic_cast<CScrollOverview*>(overview_);
+    if (!overview || !overview->closing || !overview->closeRemovalPending)
+        return;
+
+    overview->closeRemovalPending = false;
+    overview->scale->setCallbackOnEnd({});
+    if (overview->closeRemovalIdle) {
+        wl_event_source_remove(overview->closeRemovalIdle);
+        overview->closeRemovalIdle = nullptr;
+    }
+    overview->releaseInputListeners();
+
+    const auto PMONITOR = overview->pMonitor.lock();
     unregisterScrollOverview(overview);
     if (scrollOverviews().empty())
         disableScrollOverviewHooks();
@@ -614,7 +626,7 @@ static CBox getPinnedFloatingOverviewWindowBox(PHLMONITOR monitor, const PHLWIND
     const float RESERVEDRIGHT  = std::max(0.F, sc<float>((FULLBOX.x + FULLBOX.width) - (WORKBOX.x + WORKBOX.width))) * MONITORSCALE;
     const float RESERVEDBOTTOM = std::max(0.F, sc<float>((FULLBOX.y + FULLBOX.height) - (WORKBOX.y + WORKBOX.height))) * MONITORSCALE;
 
-    const auto WORKSPACEGAP       = sc<float>(ScrollOverview::Config::getWorkspaceGap()) * MONITORSCALE;
+    const auto WORKSPACEGAP       = sc<float>(ScrollOverview::Config::getWorkspaceGap(monitor)) * MONITORSCALE;
     const auto RESERVEDWIDTH      = RIGHT ? RESERVEDRIGHT : RESERVEDLEFT;
     const auto CALCULATEDWIDTH    = std::max(1.F, sc<float>((MONITORW - MONITORW * targetOverviewScale) / 2.F - 2.F * WORKSPACEGAP - RESERVEDWIDTH));
     const auto CALCULATEDSCALE    = CALCULATEDWIDTH / sc<float>(WINDOWSIZE.x);
@@ -653,11 +665,11 @@ struct SOverviewShadowConfig {
     Config::CGradientValueData color;
 };
 
-static SOverviewShadowConfig getOverviewShadowConfig() {
-    const auto enabled     = ScrollOverview::Config::getShadowEnabled();
-    const auto range       = ScrollOverview::Config::getShadowRange();
-    const auto renderPower = ScrollOverview::Config::getShadowRenderPower();
-    const auto color       = ScrollOverview::Config::getShadowColor();
+static SOverviewShadowConfig getOverviewShadowConfig(PHLMONITOR monitor) {
+    const auto enabled     = ScrollOverview::Config::getShadowEnabled(monitor);
+    const auto range       = ScrollOverview::Config::getShadowRange(monitor);
+    const auto renderPower = ScrollOverview::Config::getShadowRenderPower(monitor);
+    const auto color       = ScrollOverview::Config::getShadowColor(monitor);
 
     const auto globalRange       = ScrollOverview::Config::getValue<int>("decoration:shadow:range");
     const auto globalRenderPower = ScrollOverview::Config::getValue<int>("decoration:shadow:render_power");
@@ -681,7 +693,7 @@ static void renderOverviewWorkspaceShadow(PHLMONITOR monitor, const CBox& worksp
     if (!monitor)
         return;
 
-    const auto SHADOW = getOverviewShadowConfig();
+    const auto SHADOW = getOverviewShadowConfig(monitor);
     const bool HASVISIBLECOLOR = std::ranges::any_of(SHADOW.color.m_colors, [](const CHyprColor& color) { return color.a > 0.F; });
     if (!SHADOW.enabled || SHADOW.range <= 0 || !HASVISIBLECOLOR || alpha <= 0.F)
         return;
@@ -709,12 +721,12 @@ static void renderOverviewWorkspaceShadow(PHLMONITOR monitor, const CBox& worksp
 }
 
 static float getWorkspaceRenderedPitch(PHLMONITOR monitor, float scale, ScrollOverview::Config::ELayout layout) {
-    return (axisSize(monitor->m_size, layout) * scale + sc<float>(ScrollOverview::Config::getWorkspaceGap())) * monitor->m_scale;
+    return (axisSize(monitor->m_size, layout) * scale + sc<float>(ScrollOverview::Config::getWorkspaceGap(monitor))) * monitor->m_scale;
 }
 
 static float getWorkspaceLogicalPitch(PHLMONITOR monitor, float scale, ScrollOverview::Config::ELayout layout) {
     const auto safeScale = std::max(scale, 0.01F);
-    return axisSize(monitor->m_size, layout) + sc<float>(ScrollOverview::Config::getWorkspaceGap()) / safeScale;
+    return axisSize(monitor->m_size, layout) + sc<float>(ScrollOverview::Config::getWorkspaceGap(monitor)) / safeScale;
 }
 
 static float getWindowVerticalOverlap(const PHLWINDOW& a, const PHLWINDOW& b) {
@@ -964,6 +976,8 @@ static void moveOverviewTargetNextToWindow(const SP<Layout::ITarget>& target, co
 }
 
 CScrollOverview::~CScrollOverview() {
+    if (closeRemovalIdle)
+        wl_event_source_remove(closeRemovalIdle);
     cancelWindowDrag();
     if (g_pointerGrabOverview == this)
         g_pointerGrabOverview = nullptr;
@@ -1005,7 +1019,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
 
     const auto          PMONITOR = monitor_ ? monitor_ : (startedOn_ && startedOn_->m_monitor ? startedOn_->m_monitor.lock() : Desktop::focusState()->monitor());
     pMonitor                     = PMONITOR;
-    layout                       = ScrollOverview::Config::getLayout();
+    layout                       = ScrollOverview::Config::getLayout(pMonitor.lock());
     if (layout == ScrollOverview::Config::ELayout::AUTO)
         layout = PMONITOR && PMONITOR->logicalBox().height > PMONITOR->logicalBox().width ? ScrollOverview::Config::ELayout::HORIZONTAL : ScrollOverview::Config::ELayout::VERTICAL;
     sharedStateOwner             = scrollOverviews().empty();
@@ -1073,7 +1087,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     workspaceInsertFadeProgress->setUpdateCallback([this](auto) { damage(); });
 
     if (!swipe)
-        *scale = ScrollOverview::Config::getScale();
+        *scale = ScrollOverview::Config::getScale(pMonitor.lock());
 
     const auto initialFullscreenWindow =
         PMONITOR && PMONITOR->m_activeWorkspace ? getOverviewWindowToShow(Fullscreen::controller()->getFullscreenWindow(PMONITOR->m_activeWorkspace)) : PHLWINDOW{};
@@ -1082,6 +1096,14 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     lastMousePosLocal = getOverviewMousePosLocal(pMonitor.lock());
 
     auto onMouseMove = [this](Vector2D, Event::SCallbackInfo& info) {
+        if (info.cancelled)
+            return;
+
+        // A pending native drag still needs Hyprland's motion processing to
+        // reach its threshold. Do not swallow it when it enters an overview.
+        if (!g_pointerGrabOverview && g_layoutManager && g_layoutManager->dragController()->target())
+            return;
+
         const auto INPUTOVERVIEW = scrollOverviewAt(g_pInputManager->getMouseCoordsInternal());
 
         if (closing || (g_pointerGrabOverview && g_pointerGrabOverview != this) || (!g_pointerGrabOverview && INPUTOVERVIEW.get() != this))
@@ -1092,11 +1114,11 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
             return;
         }
 
-        const bool     LEFT_HANDED           = ScrollOverview::Config::getLeftHanded();
+        const bool     LEFT_HANDED           = ScrollOverview::Config::getLeftHanded(pMonitor.lock());
         const uint32_t MAIN_BUTTON           = LEFT_HANDED ? BTN_RIGHT : BTN_LEFT;
-        const bool     INVERT_DRAG_MODE      = ScrollOverview::Config::getDragMode() == 1;
+        const bool     INVERT_DRAG_MODE      = ScrollOverview::Config::getDragMode(pMonitor.lock()) == 1;
         const uint32_t SECONDARY_DRAG_BUTTON = BTN_MIDDLE;
-        const float    DRAGTHRESHOLD         = ScrollOverview::Config::getDragThreshold() * (pMonitor ? pMonitor->m_scale : 1.F);
+        const float    DRAGTHRESHOLD         = ScrollOverview::Config::getDragThreshold(pMonitor.lock()) * (pMonitor ? pMonitor->m_scale : 1.F);
         const float    DRAGTHRESHOLDSQ       = std::pow(DRAGTHRESHOLD, 2);
 
         lastMousePosLocal = getOverviewMousePosLocal(pMonitor.lock());
@@ -1193,6 +1215,10 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         if (info.cancelled)
             return;
 
+        // If a native drag was not adopted, Hyprland must receive its release.
+        if (!g_pointerGrabOverview && g_layoutManager && g_layoutManager->dragController()->target())
+            return;
+
         const bool FORWARDEDTOPLAYERRELEASE =
             event.state == WL_POINTER_BUTTON_STATE_RELEASED && g_topLayerPointerButtons.contains(event.button);
         const bool ADOPTEDNATIVEDRAGRELEASE = dragAdoptedFromNative && g_pointerGrabOverview == this && event.state == WL_POINTER_BUTTON_STATE_RELEASED;
@@ -1210,11 +1236,12 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         const bool RELEASESPOINTERGRAB = event.state == WL_POINTER_BUTTON_STATE_RELEASED;
         auto       releasePointerGrab  = Hyprutils::Utils::CScopeGuard([this, RELEASESPOINTERGRAB] {
             if (RELEASESPOINTERGRAB && g_pointerGrabOverview == this) {
-                if (dragCancelledAwaitingRelease && closing && closeRemovalPending && !scale->isBeingAnimated())
-                    wl_event_loop_add_idle(
+                if (dragCancelledAwaitingRelease && closing && closeRemovalPending && !scale->isBeingAnimated() && !closeRemovalIdle)
+                    closeRemovalIdle = wl_event_loop_add_idle(
                         g_pCompositor->m_wlEventLoop,
                         [](void* data) {
                             auto* const overview = sc<CScrollOverview*>(data);
+                            overview->closeRemovalIdle = nullptr;
                             if (overview->closing && overview->closeRemovalPending && !overview->dragCancelledAwaitingRelease)
                                 removeOverview(overview);
                         },
@@ -1276,10 +1303,10 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         releaseTopLayerPointerButtons(event.timeMs);
         g_pInputManager->releaseAllMouseButtons();
 
-        const bool     LEFT_HANDED        = ScrollOverview::Config::getLeftHanded();
+        const bool     LEFT_HANDED        = ScrollOverview::Config::getLeftHanded(pMonitor.lock());
         const uint32_t MAIN_BUTTON        = LEFT_HANDED ? BTN_RIGHT : BTN_LEFT;
         const uint32_t RESIZE_BUTTON      = LEFT_HANDED ? BTN_LEFT : BTN_RIGHT;
-        const bool     INVERT_DRAG_MODE   = ScrollOverview::Config::getDragMode() == 1;
+        const bool     INVERT_DRAG_MODE   = ScrollOverview::Config::getDragMode(pMonitor.lock()) == 1;
         const uint32_t SECONDARY_DRAG_BUTTON = BTN_MIDDLE;
         const auto     clearSubmapMouseClickPending = [&]() {
             submapMouseClickPending = false;
@@ -1490,8 +1517,8 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         info.cancelled = true;
 
         const bool WHEEL  = e.source == WL_POINTER_AXIS_SOURCE_WHEEL;
-        const auto ACTION = e.axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? ScrollOverview::Config::getHorizontalScrollAction(layout, WHEEL) :
-                                                                          ScrollOverview::Config::getVerticalScrollAction(layout, WHEEL);
+        const auto ACTION = e.axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? ScrollOverview::Config::getHorizontalScrollAction(layout, pMonitor.lock(), WHEEL) :
+                                                                          ScrollOverview::Config::getVerticalScrollAction(layout, pMonitor.lock(), WHEEL);
 
         // mouse wheel: discrete stepping, throttled by scroll_event_delay so one notch is one step
         if (e.source == WL_POINTER_AXIS_SOURCE_WHEEL) {
@@ -1791,9 +1818,9 @@ void CScrollOverview::renderGlobalWallpaper(PHLMONITOR monitor, const Time::stea
     // Hyprland's GL blur (updateBackdropBlurCache -> blurFramebuffer), which
     // produces GPU noise against this texture — render() routes custom
     // wallpapers straight here and skips the GL blur cache.
-    const std::string CONFIGUREDPATH = ScrollOverview::Config::getWallpaperPath();
+    const std::string CONFIGUREDPATH = ScrollOverview::Config::getWallpaperPath(monitor);
     if (!CONFIGUREDPATH.empty()) {
-        const bool WANTBLUR = ScrollOverview::Config::getBlur();
+        const bool WANTBLUR = ScrollOverview::Config::getBlur(monitor);
 
         if (m_lastLoadedWallpaperPath != CONFIGUREDPATH) {
             m_customWallpaperTex.reset();
@@ -1940,7 +1967,7 @@ void CScrollOverview::renderGlobalWallpaper(PHLMONITOR monitor, const Time::stea
 }
 
 void CScrollOverview::updateBackdropBlurCache(PHLMONITOR monitor, int wallpaperMode, const Time::steady_tp& now) {
-    if (!monitor || wallpaperMode == 1 || !ScrollOverview::Config::getBlur())
+    if (!monitor || wallpaperMode == 1 || !ScrollOverview::Config::getBlur(pMonitor.lock()))
         return;
 
     if (lastBackdropWallpaperMode != wallpaperMode) {
@@ -2054,7 +2081,7 @@ float CScrollOverview::workspaceOverviewOffset(size_t workspaceIdx, size_t activ
     const auto MONITORSCALE        = MONITOR ? std::max(MONITOR->m_scale, 0.01F) : 1.F;
     const auto MONITORSIZE         = MONITOR ? axisSize(MONITOR->m_size, layout) : 0.F;
     const auto RENDERSCALE         = MONITOR && MONITORSIZE > 0 ?
-        std::max(0.01F, (workspacePitch / MONITORSCALE - sc<float>(ScrollOverview::Config::getWorkspaceGap())) / sc<float>(MONITORSIZE)) :
+        std::max(0.01F, (workspacePitch / MONITORSCALE - sc<float>(ScrollOverview::Config::getWorkspaceGap(pMonitor.lock()))) / sc<float>(MONITORSIZE)) :
         std::max(scale->value(), 0.01F);
     const auto LOGICALPITCH        = MONITOR ? getWorkspaceLogicalPitch(MONITOR, RENDERSCALE, layout) : workspacePitch / std::max(RENDERSCALE * MONITORSCALE, 0.01F);
     const auto RENDEREDLOGICALUNIT = RENDERSCALE * MONITORSCALE;
@@ -2941,7 +2968,7 @@ void CScrollOverview::beginWindowDrag(PHLWINDOW window) {
     if (MONITOR && workspaceIdx < images.size())
         snapshot.tapeTranslation = overviewScrollingCameraTranslation(overviewScrollingAlgorithmForWorkspace(snapshot.workspace));
 
-    initializeWindowDrag(snapshot, false, ScrollOverview::Config::getCrossMonitorDrag());
+    initializeWindowDrag(snapshot, false, ScrollOverview::Config::getCrossMonitorDrag(pMonitor.lock()));
     if (MONITOR && workspaceIdx < images.size())
         refreshDragOriginalOverviewBoxes();
     updateWindowDrag();
@@ -3709,7 +3736,7 @@ void CScrollOverview::moveViewportWorkspace(bool up) {
 }
 
 bool CScrollOverview::scrollStepAllowed(uint32_t timeMs) {
-    const uint32_t DELAY = sc<uint32_t>(ScrollOverview::Config::getScrollEventDelay());
+    const uint32_t DELAY = sc<uint32_t>(ScrollOverview::Config::getScrollEventDelay(pMonitor.lock()));
 
     // throttle discrete scroll steps so a single notch / a burst of high-res events only steps once
     if (lastScrollStepTimeMs != 0 && timeMs >= lastScrollStepTimeMs && timeMs - lastScrollStepTimeMs < DELAY)
@@ -3739,7 +3766,7 @@ void CScrollOverview::trackpadSwipeLayout(const PHLWORKSPACE target, const doubl
     }
 
     trackpadTapeFollowing = true;
-    ALGO->moveTape(sc<float>(-1 * delta * ScrollOverview::Config::getTouchpadScrollFactor() / SCALE));
+    ALGO->moveTape(sc<float>(-1 * delta * ScrollOverview::Config::getTouchpadScrollFactor(pMonitor.lock()) / SCALE));
     damage();
 }
 
@@ -3757,7 +3784,7 @@ void CScrollOverview::trackpadSwipeWorkspace(const double delta) {
     const float SCALE = std::max<float>(scale->value(), 0.01F);
 
     trackpadWorkspaceFollowing  = true;
-    trackpadScrollAccum         += delta * ScrollOverview::Config::getTouchpadScrollFactor();
+    trackpadScrollAccum         += delta * ScrollOverview::Config::getTouchpadScrollFactor(pMonitor.lock());
 
     viewOffset->setValueAndWarp(axisOffsetVector(sc<float>(trackpadWorkspaceScrollOffset(MONITOR, SCALE)), layout));
     damage();
@@ -4441,7 +4468,7 @@ void CScrollOverview::renderWorkspaceBackground(PHLMONITOR monitor, size_t works
 
     renderOverviewWorkspaceShadow(monitor, WORKSPACEBOX, renderScale, wallpaperMode == 0, WORKSPACEALPHA);
 
-    if (ScrollOverview::Config::getBlur() && wallpaperMode != 1 && WORKSPACEALPHA > 0.001F)
+    if (ScrollOverview::Config::getBlur(pMonitor.lock()) && wallpaperMode != 1 && WORKSPACEALPHA > 0.001F)
         OverviewRender::queueBlur(WORKSPACEBOX, 0, 2.F, WORKSPACEALPHA, false);
 
     if (wallpaperMode != 0 && WORKSPACEALPHA > 0.001F)
@@ -4630,7 +4657,7 @@ void CScrollOverview::renderPinnedFloatingWindows(PHLMONITOR monitor, float over
     if (!monitor)
         return;
 
-    const auto TARGETOVERVIEWSCALE = ScrollOverview::Config::getScale();
+    const auto TARGETOVERVIEWSCALE = ScrollOverview::Config::getScale(pMonitor.lock());
     const auto ANIMATIONPROGRESS   = (1.F - TARGETOVERVIEWSCALE) > 0.001F ? (1.F - overviewScale) / (1.F - TARGETOVERVIEWSCALE) : 1.F;
 
     for (const auto& windowRef : pinnedFloatingWindows) {
@@ -5449,7 +5476,7 @@ void CScrollOverview::reopen() {
     setClosing(false);
     activateSubmapIfConfigured();
     emitFullscreenVisibilityState(Desktop::focusState()->window(), true);
-    *scale = ScrollOverview::Config::getScale();
+    *scale = ScrollOverview::Config::getScale(pMonitor.lock());
     damage();
 }
 
@@ -5604,15 +5631,15 @@ void CScrollOverview::render() {
         lastOverviewBlurViewOffset = VIEWOFFSET;
     }
 
-    const auto WALLPAPERMODE = ScrollOverview::Config::getWallpaperMode();
-    const bool HASCUSTOMWP   = !ScrollOverview::Config::getWallpaperPath().empty();
+    const auto WALLPAPERMODE = ScrollOverview::Config::getWallpaperMode(pMonitor.lock());
+    const bool HASCUSTOMWP   = !ScrollOverview::Config::getWallpaperPath(pMonitor.lock()).empty();
 
     if (HASCUSTOMWP && WALLPAPERMODE != 1) {
         // Custom image-file wallpaper bakes its own CPU pre-blur inside
         // renderGlobalWallpaper — Hyprland's GL blur (blurFramebuffer) produces
         // noise against this texture, so skip the GL blur cache entirely.
         renderGlobalWallpaper(MONITOR, NOW);
-    } else if (ScrollOverview::Config::getBlur() && WALLPAPERMODE != 1) {
+    } else if (ScrollOverview::Config::getBlur(pMonitor.lock()) && WALLPAPERMODE != 1) {
         updateBackdropBlurCache(MONITOR, WALLPAPERMODE, NOW);
         if (backdropBlurFB && backdropBlurFB->isAllocated() && backdropBlurFB->getTexture())
             renderBackdropBlurCache(MONITOR);
@@ -5801,18 +5828,18 @@ void CScrollOverview::resetSwipe() {
         return;
     }
 
-    (*scale)    = ScrollOverview::Config::getScale();
+    (*scale)    = ScrollOverview::Config::getScale(pMonitor.lock());
     m_isSwiping = false;
 }
 
 void CScrollOverview::onSwipeUpdate(double delta) {
-    const int DISTANCE = ScrollOverview::Config::getGestureDistance();
+    const int DISTANCE = ScrollOverview::Config::getGestureDistance(pMonitor.lock());
 
     m_isSwiping = true;
 
     const float PERC = closing ? 1.0 - std::clamp(delta / sc<double>(DISTANCE), 0.0, 1.0) : std::clamp(delta / sc<double>(DISTANCE), 0.0, 1.0);
 
-    scale->setValueAndWarp(hyprlerp(1.F, ScrollOverview::Config::getScale(), PERC));
+    scale->setValueAndWarp(hyprlerp(1.F, ScrollOverview::Config::getScale(pMonitor.lock()), PERC));
 }
 
 void CScrollOverview::onSwipeEnd() {
@@ -5821,6 +5848,6 @@ void CScrollOverview::onSwipeEnd() {
         return;
     }
 
-    (*scale)    = ScrollOverview::Config::getScale();
+    (*scale)    = ScrollOverview::Config::getScale(pMonitor.lock());
     m_isSwiping = false;
 }

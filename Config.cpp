@@ -11,7 +11,12 @@
 #include <hyprland/src/config/values/types/GradientValue.hpp>
 #include <hyprland/src/managers/KeybindManager.hpp>
 
+#include <hyprland/src/config/lua/types/LuaConfigUtils.hpp>
+#include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/output/Monitor.hpp>
+
 #include <regex>
+#include <cmath>
 
 extern "C" {
 #include <lauxlib.h>
@@ -21,6 +26,11 @@ extern "C" {
 namespace {
 
 ScrollOverview::Config::TGestureRegistrar g_gestureRegistrar   = nullptr;
+
+using TMonitorValues = std::unordered_map<std::string, UP<::Config::Lua::ILuaConfigValue>>;
+std::unordered_map<std::string, TMonitorValues> g_monitorValues;
+std::unordered_map<std::string, SP<::Config::Values::IValue>> g_configDefinitions;
+CHyprSignalListener g_configPreReloadHook;
 
 int dispatcherFactoryLua(lua_State* L, std::string_view name);
 
@@ -146,9 +156,110 @@ int dispatcherFactoryLua(lua_State* L, std::string_view name) {
     return 1;
 }
 
+std::optional<std::string> validateMonitorRange(const SP<::Config::Values::IValue>& definition, ::Config::Lua::ILuaConfigValue& value) {
+    const auto check = [](const auto& definition, auto data) -> std::optional<std::string> {
+        if (definition.m_min && data < *definition.m_min)
+            return std::format("value {} is less than the minimum of {}", data, *definition.m_min);
+        if (definition.m_max && data > *definition.m_max)
+            return std::format("value {} is more than the maximum of {}", data, *definition.m_max);
+        return std::nullopt;
+    };
+    // Some Hyprland versions do not preserve bounds in fromGenericValue().
+    if (const auto integer = dynamic_cast<::Config::Values::CIntValue*>(definition.get()))
+        return check(*integer, value.asInt());
+    if (const auto number = dynamic_cast<::Config::Values::CFloatValue*>(definition.get())) {
+        if (!std::isfinite(value.asFloat()))
+            return "expected a finite number";
+        return check(*number, value.asFloat());
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> configureMonitor(lua_State* L, const std::string& output) {
+    TMonitorValues pending;
+    const auto parseTable = [&](auto&& self, int table, const std::string& prefix) -> std::optional<std::string> {
+        table = lua_absindex(L, table);
+        lua_pushnil(L);
+        while (lua_next(L, table)) {
+            if (lua_type(L, -2) != LUA_TSTRING) {
+                lua_pop(L, 2);
+                return "option names must be strings";
+            }
+
+            const std::string key = lua_tostring(L, -2);
+            if (prefix.empty() && key == "output") {
+                lua_pop(L, 1);
+                continue;
+            }
+
+            const auto path = prefix.empty() ? key : prefix + ":" + key;
+            const auto name = "plugin:scrolloverview:" + path;
+            if (const auto definition = g_configDefinitions.find(name); definition != g_configDefinitions.end()) {
+                auto value = ::Config::Lua::fromGenericValue(definition->second);
+                if (!value) {
+                    lua_pop(L, 2);
+                    return "unsupported option '" + path + "'";
+                }
+
+                const auto error = value->parse(L);
+                if (error.errorCode != ::Config::Lua::PARSE_ERROR_OK) {
+                    lua_pop(L, 2);
+                    return path + ": " + error.message;
+                }
+                if (const auto error = validateMonitorRange(definition->second, *value)) {
+                    lua_pop(L, 2);
+                    return path + ": " + *error;
+                }
+                pending.insert_or_assign(name, std::move(value));
+            } else {
+                const bool category = std::ranges::any_of(g_configDefinitions, [&name](const auto& entry) { return entry.first.starts_with(name + ":"); });
+                if (!category || !lua_istable(L, -1)) {
+                    lua_pop(L, 2);
+                    return category ? path + ": expected a table" : "unknown option '" + path + "'";
+                }
+                if (const auto error = self(self, -1, path)) {
+                    lua_pop(L, 2);
+                    return error;
+                }
+            }
+            lua_pop(L, 1);
+        }
+        return std::nullopt;
+    };
+
+    if (const auto error = parseTable(parseTable, 1, ""))
+        return error;
+
+    // Commit only after every field has passed the same parser as global config.
+    // Keep sparse overrides so later global changes remain visible to this output.
+    auto& values = g_monitorValues[output];
+    for (auto& [name, value] : pending)
+        values.insert_or_assign(name, std::move(value));
+    return std::nullopt;
+}
+
 int configureLua(lua_State* L) {
     if (!lua_istable(L, 1))
         return luaL_error(L, "configure: expected a table");
+
+    lua_getfield(L, 1, "output");
+    if (!lua_isnil(L, -1)) {
+        if (lua_type(L, -1) != LUA_TSTRING || lua_rawlen(L, -1) == 0)
+            return luaL_error(L, "configure: output must be a non-empty monitor name");
+
+        // Leave C++ scopes before lua_error performs its longjmp.
+        bool failed = false;
+        {
+            const std::string output = lua_tostring(L, -1);
+            lua_pop(L, 1);
+            if (const auto error = configureMonitor(L, output)) {
+                lua_pushfstring(L, "configure: output %s: %s", output.c_str(), error->c_str());
+                failed = true;
+            }
+        }
+        return failed ? lua_error(L) : 0;
+    }
+    lua_pop(L, 1);
 
     const int CONFIG = lua_absindex(L, 1);
 
@@ -230,6 +341,29 @@ int gestureLua(lua_State* L) {
 
 namespace ScrollOverview::Config {
 
+const void* monitorValueData(const std::string& name, PHLMONITOR monitor) {
+    if (!monitor)
+        return nullptr;
+
+    const auto output = g_monitorValues.find(monitor->m_name);
+    if (output == g_monitorValues.end())
+        return nullptr;
+
+    const auto value = output->second.find(name);
+    return value == output->second.end() ? nullptr : value->second->data();
+}
+
+bool hasCrossMonitorDragEnabled() {
+    constexpr auto NAME = "plugin:scrolloverview:cross_monitor_drag";
+    if (getValue<bool>(NAME))
+        return true;
+
+    return std::ranges::any_of(g_monitorValues, [NAME](const auto& output) {
+        const auto value = output.second.find(NAME);
+        return value != output.second.end() && value->second->asInt() != 0;
+    });
+}
+
 void registerDispatcher(const std::string& name, TDispatcher dispatcher) {
     HyprlandAPI::addDispatcherV2(SCROLLOVERVIEW_HANDLE, "scrolloverview:" + name, dispatcher);
 
@@ -262,104 +396,99 @@ static void registerLuaFunctions() {
     HyprlandAPI::addLuaFunction(SCROLLOVERVIEW_HANDLE, "scrolloverview", "configure", ::configureLua);
 }
 
-static void registerConfigValues() {
+static void defineConfigValues() {
     using namespace ::Config::Values;
+    const auto addValue = [](SP<IValue> value) {
+        g_configDefinitions.emplace(value->name(), value);
+    };
 
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:gesture_distance", "gesture distance in pixels", 200, SIntValueOptions{.min = 1}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CFloatValue>("plugin:scrolloverview:scale", "overview scale", 0.5F, SFloatValueOptions{.min = 0.1F, .max = 0.9F}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:workspace_gap", "gap between overview workspaces", 0, SIntValueOptions{.min = 0}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CStringValue>("plugin:scrolloverview:layout", "overview layout", Hyprlang::STRING{"vertical"}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CBoolValue>("plugin:scrolloverview:cross_monitor_drag", "enable cross-monitor window dragging", false));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:input:scroll_event_delay", "minimum delay (ms) between discrete scroll steps (wheel workspace nav and trackpad focus stepping)", 200, SIntValueOptions{.min = 0}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CFloatValue>("plugin:scrolloverview:input:touchpad_scroll_factor", "overview touchpad scroll factor", 1.F,
-                                                          SFloatValueOptions{.min = 0.F}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:input:left_handed", "overview left handed mouse buttons, 2 follows input:left_handed", 2,
-                                                        SIntValueOptions{.min = 0, .max = 2}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:input:scrolling_mode", "overview mouse wheel behavior", 0,
-                                                        SIntValueOptions{.min = 0, .max = 3}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:input:drag_mode", "overview mouse drag behavior", 0,
-                                                        SIntValueOptions{.min = 0, .max = 1}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:input:drag_threshold", "overview drag threshold", 10,
-                                                        SIntValueOptions{.min = 0}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:wallpaper", "wallpaper mode", 0, SIntValueOptions{.min = 0, .max = 2}));
+    addValue(makeShared<CIntValue>("plugin:scrolloverview:gesture_distance", "gesture distance in pixels", 200, SIntValueOptions{.min = 1}));
+    addValue(makeShared<CFloatValue>("plugin:scrolloverview:scale", "overview scale", 0.5F, SFloatValueOptions{.min = 0.1F, .max = 0.9F}));
+    addValue(makeShared<CIntValue>("plugin:scrolloverview:workspace_gap", "gap between overview workspaces", 0, SIntValueOptions{.min = 0}));
+    addValue(makeShared<CStringValue>("plugin:scrolloverview:layout", "overview layout", Hyprlang::STRING{"vertical"}));
+    addValue(makeShared<CBoolValue>("plugin:scrolloverview:cross_monitor_drag", "enable cross-monitor window dragging", false));
+    addValue(makeShared<CIntValue>("plugin:scrolloverview:input:scroll_event_delay", "minimum delay (ms) between discrete scroll steps (wheel workspace nav and trackpad focus stepping)", 200, SIntValueOptions{.min = 0}));
+    addValue(makeShared<CFloatValue>("plugin:scrolloverview:input:touchpad_scroll_factor", "overview touchpad scroll factor", 1.F,
+                                     SFloatValueOptions{.min = 0.F}));
+    addValue(makeShared<CIntValue>("plugin:scrolloverview:input:left_handed", "overview left handed mouse buttons, 2 follows input:left_handed", 2,
+                                   SIntValueOptions{.min = 0, .max = 2}));
+    addValue(makeShared<CIntValue>("plugin:scrolloverview:input:scrolling_mode", "overview mouse wheel behavior", 0,
+                                   SIntValueOptions{.min = 0, .max = 3}));
+    addValue(makeShared<CIntValue>("plugin:scrolloverview:input:drag_mode", "overview mouse drag behavior", 0,
+                                   SIntValueOptions{.min = 0, .max = 1}));
+    addValue(makeShared<CIntValue>("plugin:scrolloverview:input:drag_threshold", "overview drag threshold", 10,
+                                   SIntValueOptions{.min = 0}));
+    addValue(makeShared<CIntValue>("plugin:scrolloverview:wallpaper", "wallpaper mode", 0, SIntValueOptions{.min = 0, .max = 2}));
     // Optional image-file backdrop -- needed for Quickshell/Qt-painted wallpaper
     // setups (dots-hyprland) whose layer surface isn't stable to sample.
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CStringValue>("plugin:scrolloverview:wallpaper_path", "path to a static image used as the overview backdrop", Hyprlang::STRING{""}));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, makeShared<CBoolValue>("plugin:scrolloverview:blur", "blur the overview wallpaper", false));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CBoolValue>("plugin:scrolloverview:shadow:enabled", "draw a shadow around each workspace card", false));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:shadow:range", "workspace card shadow range", -1));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CIntValue>("plugin:scrolloverview:shadow:render_power", "workspace card shadow render power", -1));
-    HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE,
-                                  makeShared<CGradientValue>("plugin:scrolloverview:shadow:color", "workspace card shadow color", -1));
+    addValue(makeShared<CStringValue>("plugin:scrolloverview:wallpaper_path", "path to a static image used as the overview backdrop", Hyprlang::STRING{""}));
+    addValue(makeShared<CBoolValue>("plugin:scrolloverview:blur", "blur the overview wallpaper", false));
+    addValue(makeShared<CBoolValue>("plugin:scrolloverview:shadow:enabled", "draw a shadow around each workspace card", false));
+    addValue(makeShared<CIntValue>("plugin:scrolloverview:shadow:range", "workspace card shadow range", -1));
+    addValue(makeShared<CIntValue>("plugin:scrolloverview:shadow:render_power", "workspace card shadow render power", -1));
+    addValue(makeShared<CGradientValue>("plugin:scrolloverview:shadow:color", "workspace card shadow color", -1));
+}
+
+static void initializeMonitorConfig() {
+    g_monitorValues.clear();
+    g_configDefinitions.clear();
+    g_configPreReloadHook = Event::bus()->m_events.config.preReload.listen([] { g_monitorValues.clear(); });
+    defineConfigValues();
 }
 
 void registerConfig() {
+    initializeMonitorConfig();
     registerLuaFunctions();
-    registerConfigValues();
+    for (const auto& [name, value] : g_configDefinitions)
+        HyprlandAPI::addConfigValueV2(SCROLLOVERVIEW_HANDLE, value);
     HyprlandAPI::reloadConfig();
 }
 
-int getGestureDistance() {
-    return std::max<int>(1, getValue<int>("plugin:scrolloverview:gesture_distance"));
+int getGestureDistance(PHLMONITOR monitor) {
+    return std::max<int>(1, getValue<int>("plugin:scrolloverview:gesture_distance", monitor));
 }
 
-float getScale() {
-    return std::clamp(getValue<float>("plugin:scrolloverview:scale"), 0.1F, 0.9F);
+float getScale(PHLMONITOR monitor) {
+    return std::clamp(getValue<float>("plugin:scrolloverview:scale", monitor), 0.1F, 0.9F);
 }
 
-int getWorkspaceGap() {
-    return std::max<int>(0, getValue<int>("plugin:scrolloverview:workspace_gap"));
+int getWorkspaceGap(PHLMONITOR monitor) {
+    return std::max<int>(0, getValue<int>("plugin:scrolloverview:workspace_gap", monitor));
 }
 
-ELayout getLayout() {
-    const auto LAYOUT = getValue<std::string>("plugin:scrolloverview:layout");
+ELayout getLayout(PHLMONITOR monitor) {
+    const auto LAYOUT = getValue<std::string>("plugin:scrolloverview:layout", monitor);
     if (LAYOUT == "auto")
         return ELayout::AUTO;
 
     return LAYOUT == "horizontal" ? ELayout::HORIZONTAL : ELayout::VERTICAL;
 }
 
-bool getCrossMonitorDrag() {
-    return getValue<bool>("plugin:scrolloverview:cross_monitor_drag");
+bool getCrossMonitorDrag(PHLMONITOR monitor) {
+    return getValue<bool>("plugin:scrolloverview:cross_monitor_drag", monitor);
 }
 
-bool getLeftHanded() {
-    const auto LEFT_HANDED = getValue<int>("plugin:scrolloverview:input:left_handed");
+bool getLeftHanded(PHLMONITOR monitor) {
+    const auto LEFT_HANDED = getValue<int>("plugin:scrolloverview:input:left_handed", monitor);
     if (LEFT_HANDED <= 1)
         return LEFT_HANDED != 0;
 
     return getValue<bool>("input:left_handed");
 }
 
-int getDragMode() {
-    return std::clamp(getValue<int>("plugin:scrolloverview:input:drag_mode"), 0, 1);
+int getDragMode(PHLMONITOR monitor) {
+    return std::clamp(getValue<int>("plugin:scrolloverview:input:drag_mode", monitor), 0, 1);
 }
 
-int getDragThreshold() {
-    return std::max<int>(0, getValue<int>("plugin:scrolloverview:input:drag_threshold"));
+int getDragThreshold(PHLMONITOR monitor) {
+    return std::max<int>(0, getValue<int>("plugin:scrolloverview:input:drag_threshold", monitor));
 }
 
-float getTouchpadScrollFactor() {
+float getTouchpadScrollFactor(PHLMONITOR monitor) {
     static constexpr float OVERVIEWTOUCHPADSCROLLFACTOR = 1.5F;
 
     return OVERVIEWTOUCHPADSCROLLFACTOR * std::max<float>(0.F, getValue<float>("input:touchpad:scroll_factor")) *
-        std::max<float>(0.F, getValue<float>("plugin:scrolloverview:input:touchpad_scroll_factor"));
+        std::max<float>(0.F, getValue<float>("plugin:scrolloverview:input:touchpad_scroll_factor", monitor));
 }
 
 // A mouse wheel has one axis worth turning, so its notches change workspaces in either
@@ -372,8 +501,8 @@ static EScrollAction defaultVerticalScrollAction(ELayout layout, bool wheel) {
     return layout == ELayout::HORIZONTAL ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
 }
 
-EScrollAction getVerticalScrollAction(ELayout layout, bool wheel) {
-    const auto MODE = std::clamp(getValue<int>("plugin:scrolloverview:input:scrolling_mode"), 0, 3);
+EScrollAction getVerticalScrollAction(ELayout layout, PHLMONITOR monitor, bool wheel) {
+    const auto MODE = std::clamp(getValue<int>("plugin:scrolloverview:input:scrolling_mode", monitor), 0, 3);
 
     switch (MODE) {
         case 1: return defaultVerticalScrollAction(layout, wheel) == EScrollAction::WORKSPACE ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
@@ -384,24 +513,24 @@ EScrollAction getVerticalScrollAction(ELayout layout, bool wheel) {
     }
 }
 
-EScrollAction getHorizontalScrollAction(ELayout layout, bool wheel) {
-    return getVerticalScrollAction(layout, wheel) == EScrollAction::WORKSPACE ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
+EScrollAction getHorizontalScrollAction(ELayout layout, PHLMONITOR monitor, bool wheel) {
+    return getVerticalScrollAction(layout, monitor, wheel) == EScrollAction::WORKSPACE ? EScrollAction::COLUMN : EScrollAction::WORKSPACE;
 }
 
-int getScrollEventDelay() {
-    return std::max<int>(0, getValue<int>("plugin:scrolloverview:input:scroll_event_delay"));
+int getScrollEventDelay(PHLMONITOR monitor) {
+    return std::max<int>(0, getValue<int>("plugin:scrolloverview:input:scroll_event_delay", monitor));
 }
 
-int getWallpaperMode() {
-    return std::clamp<int>(getValue<int>("plugin:scrolloverview:wallpaper"), 0, 2);
+int getWallpaperMode(PHLMONITOR monitor) {
+    return std::clamp<int>(getValue<int>("plugin:scrolloverview:wallpaper", monitor), 0, 2);
 }
 
-std::string getWallpaperPath() {
-    return getValue<std::string>("plugin:scrolloverview:wallpaper_path");
+std::string getWallpaperPath(PHLMONITOR monitor) {
+    return getValue<std::string>("plugin:scrolloverview:wallpaper_path", monitor);
 }
 
-bool getBlur() {
-    return getValue<bool>("plugin:scrolloverview:blur");
+bool getBlur(PHLMONITOR monitor) {
+    return getValue<bool>("plugin:scrolloverview:blur", monitor);
 }
 
 ::Config::CCssGapData getCssGapData(const std::string& name) {
@@ -416,25 +545,25 @@ bool getBlur() {
     return *GAPS;
 }
 
-int getShadowEnabled() {
-    return getValue<bool>("plugin:scrolloverview:shadow:enabled") ? 1 : 0;
+int getShadowEnabled(PHLMONITOR monitor) {
+    return getValue<bool>("plugin:scrolloverview:shadow:enabled", monitor) ? 1 : 0;
 }
 
-int getShadowRange() {
-    return getValue<int>("plugin:scrolloverview:shadow:range");
+int getShadowRange(PHLMONITOR monitor) {
+    return getValue<int>("plugin:scrolloverview:shadow:range", monitor);
 }
 
-int getShadowRenderPower() {
-    return getValue<int>("plugin:scrolloverview:shadow:render_power");
+int getShadowRenderPower(PHLMONITOR monitor) {
+    return getValue<int>("plugin:scrolloverview:shadow:render_power", monitor);
 }
 
-std::optional<::Config::CGradientValueData> getShadowColor() {
+std::optional<::Config::CGradientValueData> getShadowColor(PHLMONITOR monitor) {
     constexpr auto NAME = "plugin:scrolloverview:shadow:color";
 
-    if (!::Config::mgr()->getConfigValue(NAME).setByUser)
+    if (!monitorValueData(NAME, monitor) && !::Config::mgr()->getConfigValue(NAME).setByUser)
         return std::nullopt;
 
-    return getValue<::Config::CGradientValueData>(NAME);
+    return getValue<::Config::CGradientValueData>(NAME, monitor);
 }
 
 }
