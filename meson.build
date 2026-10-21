@@ -47,6 +47,7 @@ shared_module(meson.project_name(), src + [version_header],
     dependency('lua5.4', 'lua', version: '>=5.4'),
     dependency('wayland-server'),
     dependency('xkbcommon'),
+    dependency('gdk-pixbuf-2.0'),
   ],
   install: true,
 )

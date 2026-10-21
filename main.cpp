@@ -29,6 +29,7 @@ using namespace Hyprutils::String;
 #include "scrollOverview.hpp"
 #include "OverviewGesture.hpp"
 #include "OverviewOpen.hpp"
+#include "OffscreenCapture.hpp"
 
 // Methods
 static CFunctionHook* g_pScrollRenderWorkspaceHook = nullptr;
@@ -706,6 +707,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     ScrollOverview::Config::registerGesture(::onRegisterOverviewGesture, ::overviewGestureKeyword);
     ScrollOverview::Config::registerConfig();
 
+    if (!enableOffscreenCapture())
+        HyprlandAPI::addNotification(SCROLLOVERVIEW_HANDLE, "[scrolloverview] Off-screen window capture fix is unavailable", CHyprColor{1.0, 0.75, 0.2, 1.0}, 7500);
+
     return {"scrolloverview", "A plugin for an overview", "Vaxry, yayuuu", SCROLLOVERVIEW_VERSION};
 }
 
@@ -713,6 +717,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_pHyprRenderer->m_renderPass.removeAllOfType("CScrollOverviewPassElement");
 
     g_unloading = true;
+    disableOffscreenCapture();
     g_nativeDragMouseMoveHook.reset();
     g_configReloadHook.reset();
     if (g_pScrollChangeWorkspaceHook)
