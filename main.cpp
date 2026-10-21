@@ -30,6 +30,7 @@ using namespace Hyprutils::String;
 #include "OverviewGesture.hpp"
 #include "OverviewOpen.hpp"
 #include "OffscreenCapture.hpp"
+#include "WorkspaceClip.hpp"
 #include "ScrollingCompatibility.hpp"
 
 // Methods
@@ -708,6 +709,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     ScrollOverview::Config::registerGesture(::onRegisterOverviewGesture, ::overviewGestureKeyword);
     ScrollOverview::Config::registerConfig();
 
+    if (!enableWorkspaceClip())
+        HyprlandAPI::addNotification(SCROLLOVERVIEW_HANDLE, "[scrolloverview] Workspace clipping hooks unavailable", CHyprColor{1.0, 0.2, 0.2, 1.0}, 5000);
     if (!enableOffscreenCapture())
         HyprlandAPI::addNotification(SCROLLOVERVIEW_HANDLE, "[scrolloverview] Off-screen window capture fix is unavailable", CHyprColor{1.0, 0.75, 0.2, 1.0}, 7500);
     if (!enableScrollingCompatibility())
@@ -722,6 +725,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_unloading = true;
     disableScrollingCompatibility();
     disableOffscreenCapture();
+    disableWorkspaceClip();
     g_nativeDragMouseMoveHook.reset();
     g_configReloadHook.reset();
     if (g_pScrollChangeWorkspaceHook)
