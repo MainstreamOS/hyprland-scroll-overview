@@ -1014,8 +1014,12 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     // so they can adjust shell-wide state — used by dots-hyprland to clear fake
     // screen rounding for clean overview corners (restored on close).
     // Observable in QML via Hyprland.onRawEvent.
-    if (g_pEventManager)
+    if (g_pEventManager) {
+        // A shell can keep its sidebar buffers painted for the workspace cards
+        // without exposing their full-size layers, which this build skips.
+        g_pEventManager->postEvent(SHyprIPCEvent{.event = "scrolloverview", .data = "sidebar-previews"});
         g_pEventManager->postEvent(SHyprIPCEvent{.event = "scrolloverview", .data = "open"});
+    }
 
     const auto          PMONITOR = monitor_ ? monitor_ : (startedOn_ && startedOn_->m_monitor ? startedOn_->m_monitor.lock() : Desktop::focusState()->monitor());
     pMonitor                     = PMONITOR;
@@ -5687,12 +5691,18 @@ void CScrollOverview::render() {
     renderDraggedWindow(MONITOR, ACTIVEIDX, PITCH, SCALE, NOW);
     renderPinnedFloatingWindows(MONITOR, SCALE, NOW);
 
+    // Sidebar layers are already drawn inside each workspace card. Their
+    // full-size surfaces keep their reservation, but must not cover the overview.
+    const auto sidebarLayer = [](const PHLLS& layer) {
+        return layer && (layer->m_namespace == "quickshell:sidebarLeft" || layer->m_namespace == "quickshell:sidebarRight");
+    };
     for (const auto LAYER : {ZWLR_LAYER_SHELL_V1_LAYER_TOP, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY}) {
         for (auto const& ls : MONITOR->m_layerSurfaceLayers[LAYER]) {
-            if (!Desktop::View::validMapped(ls.lock()))
+            const auto layer = ls.lock();
+            if (!Desktop::View::validMapped(layer) || sidebarLayer(layer))
                 continue;
 
-            g_pHyprRenderer->renderLayer(ls.lock(), MONITOR, NOW);
+            g_pHyprRenderer->renderLayer(layer, MONITOR, NOW);
         }
     }
 
@@ -5701,10 +5711,11 @@ void CScrollOverview::render() {
     // overview. render() fully replaces Hyprland's renderAllClientsForWorkspace
     // path, which would otherwise draw this layer.
     for (auto const& ls : MONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY]) {
-        if (!Desktop::View::validMapped(ls.lock()))
+        const auto layer = ls.lock();
+        if (!Desktop::View::validMapped(layer) || sidebarLayer(layer))
             continue;
 
-        g_pHyprRenderer->renderLayer(ls.lock(), MONITOR, NOW);
+        g_pHyprRenderer->renderLayer(layer, MONITOR, NOW);
     }
 
     sendOverviewFrameCallbacks(NOW);
