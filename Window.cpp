@@ -204,10 +204,12 @@ struct SOverviewPseudoFocusState {
             window->m_ruleApplicator->inactiveBorderColor().valueOr(BORDERCOLOR);
 
         const auto SHADOWACTIVE   = ScrollOverview::Config::getValue<Config::CGradientValueData>("decoration:shadow:color");
-        const auto SHADOWINACTIVE = Config::mgr()->getConfigValue("decoration:shadow:color_inactive").setByUser ?
+        const auto shadowInactiveReply = Config::mgr()->getConfigValue("decoration:shadow:color_inactive");
+        const auto SHADOWINACTIVE = (shadowInactiveReply.setByUser && *shadowInactiveReply.setByUser) ?
             ScrollOverview::Config::getValue<Config::CGradientValueData>("decoration:shadow:color_inactive") : SHADOWACTIVE;
         const auto GLOWACTIVE     = ScrollOverview::Config::getValue<Config::CGradientValueData>("decoration:glow:color");
-        const auto GLOWINACTIVE   = Config::mgr()->getConfigValue("decoration:glow:color_inactive").setByUser ?
+        const auto glowInactiveReply   = Config::mgr()->getConfigValue("decoration:glow:color_inactive");
+        const auto GLOWINACTIVE   = (glowInactiveReply.setByUser && *glowInactiveReply.setByUser) ?
             ScrollOverview::Config::getValue<Config::CGradientValueData>("decoration:glow:color_inactive") : GLOWACTIVE;
         const Config::CGradientValueData TRANSPARENT{CHyprColor{0, 0, 0, 0}};
 
