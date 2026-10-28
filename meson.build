@@ -33,12 +33,12 @@ version_header = custom_target(
   build_always_stale: true,
 )
 
-hyprland = dependency('hyprland')
+hyprland = dependency('hyprland', version: '>=0.57.0')
 
 shared_module(meson.project_name(), src + [version_header],
   include_directories: include_directories('.'),
   dependencies: [
-    dependency('hyprland'),
+    dependency('hyprland', version: '>=0.57.0'),
     dependency('pixman-1'),
     dependency('libdrm'),
     dependency('pangocairo'),

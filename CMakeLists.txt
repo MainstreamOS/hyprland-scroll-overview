@@ -25,7 +25,7 @@ target_include_directories(scrolloverview PRIVATE "${VERSION_HEADER_DIR}")
 find_package(PkgConfig REQUIRED)
 pkg_search_module(lua REQUIRED IMPORTED_TARGET "lua5.4>=5.4" "lua>=5.4")
 pkg_check_modules(deps REQUIRED IMPORTED_TARGET
-    hyprland
+    hyprland>=0.57.0
     libdrm
     libinput
     libudev

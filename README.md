@@ -1,5 +1,8 @@
 # ScrollOverview
 
+The Mainstream branch targets Hyprland 0.57.0. Rebuild against the exact
+Hyprland version you will run; the plugin checks the compositor ABI before loading.
+
 ScrollOverview is an overview plugin like niri.
 
 https://github.com/user-attachments/assets/e5eb1ad2-79bc-492a-82cd-02cd8b960d3e

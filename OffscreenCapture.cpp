@@ -2,7 +2,8 @@
 #include "OffscreenCapture.hpp"
 
 #include <algorithm>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <type_traits>
+#include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/protocols/types/Buffer.hpp>
@@ -13,12 +14,14 @@
 #undef private
 
 static CFunctionHook* g_pOutputCommitHook = nullptr;
-using origOutputCommit                    = void (*)(Screenshare::CScreenshareManager*, PHLMONITOR);
+using origOutputCommit                    = void (*)(Screenshare::CScreenshareManager*, PHLMONITOR, bool);
+static_assert(std::is_same_v<decltype(&Screenshare::CScreenshareManager::onOutputCommit),
+                             void (Screenshare::CScreenshareManager::*)(PHLMONITOR, bool)>);
 
-static void hkOutputCommit(Screenshare::CScreenshareManager* manager, PHLMONITOR monitor) {
-    rc<origOutputCommit>(g_pOutputCommitHook->m_original)(manager, monitor);
+static void hkOutputCommit(Screenshare::CScreenshareManager* manager, PHLMONITOR monitor, bool copyFBPrepared) {
+    rc<origOutputCommit>(g_pOutputCommitHook->m_original)(manager, monitor, copyFBPrepared);
 
-    if (!monitor || manager->m_pendingFrames.empty())
+    if (!copyFBPrepared || !monitor || manager->m_pendingFrames.empty())
         return;
 
     // Hyprland 0.56 skips window captures whose geometry is outside the monitor,
@@ -39,7 +42,7 @@ static void hkOutputCommit(Screenshare::CScreenshareManager* manager, PHLMONITOR
             continue;
 
         const auto WINDOW = SESSION->m_window;
-        if (WINDOW.expired() || !WINDOW->m_isMapped)
+        if (WINDOW.expired() || !WINDOW->mapped())
             continue;
 
         const auto GEOMETRY = WINDOW->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT);

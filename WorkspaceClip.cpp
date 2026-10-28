@@ -6,8 +6,10 @@
 #include <cxxabi.h>
 #include <memory>
 #include <string_view>
-#include <hyprland/src/desktop/Workspace.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowEffectsController.hpp>
+#include <hyprland/src/render/transformer/TransformerList.hpp>
 #include <hyprland/src/layout/algorithm/Algorithm.hpp>
 #include <hyprland/src/layout/algorithm/tiled/scrolling/ScrollingAlgorithm.hpp>
 #include <hyprland/src/layout/space/Space.hpp>
@@ -25,34 +27,37 @@ static std::optional<SWorkspaceClip> g_workspaceClip;
 static CFunctionHook*                g_windowHook = nullptr;
 static CFunctionHook*                g_addHook    = nullptr;
 static CFunctionHook*                g_drawHook   = nullptr;
-using origWindow                                  = void (*)(Render::IHyprRenderer*, PHLWINDOW, PHLMONITOR, const Time::steady_tp&, bool, Render::eRenderPassMode, bool, bool);
+using origWindow                                  = void (*)(Render::IHyprRenderer*, Render::CRenderContext&, PHLWINDOW, PHLMONITOR, const Render::SWindowRenderPresentation&, const Time::steady_tp&, bool, Render::eRenderPassMode, bool, bool);
 using origAdd                                     = void (*)(Render::CRenderPass*, UP<IPassElement>&&);
-using origDraw                                    = void (*)(Render::IElementRenderer*, WP<IPassElement>, const CRegion&);
+using origDraw                                    = void (*)(Render::IElementRenderer*, Render::CRenderContext&, WP<IPassElement>, const CRegion&);
 
 class CWorkspaceClipElement : public IPassElement {
   public:
     CWorkspaceClipElement(UP<IPassElement>&& element, const SWorkspaceClip& clip) : inner(std::move(element)), clip(clip) {}
-    bool needsLiveBlur() override {
-        return inner->needsLiveBlur();
+    bool needsLiveBlur(Render::CRenderContext& ctx) override {
+        return inner->needsLiveBlur(ctx);
     }
-    bool needsPrecomputeBlur() override {
-        return inner->needsPrecomputeBlur();
+    bool needsPrecomputeBlur(Render::CRenderContext& ctx) override {
+        return inner->needsPrecomputeBlur(ctx);
     }
-    bool undiscardable() override {
-        return inner->undiscardable();
+    bool undiscardable(Render::CRenderContext& ctx) override {
+        return inner->undiscardable(ctx);
     }
-    bool disableSimplification() override {
-        return inner->disableSimplification();
+    bool disableSimplification(Render::CRenderContext& ctx) override {
+        return inner->disableSimplification(ctx);
     }
-    void discard() override {
-        inner->discard();
+    bool requiresFullDamage(Render::CRenderContext& ctx) override {
+        return inner->requiresFullDamage(ctx);
     }
-    std::optional<CBox> boundingBox() override {
-        const auto BOX = inner->boundingBox();
+    void discard(Render::CRenderContext& ctx) override {
+        inner->discard(ctx);
+    }
+    std::optional<CBox> boundingBox(Render::CRenderContext& ctx) override {
+        const auto BOX = inner->boundingBox(ctx);
         return BOX ? BOX->intersection(clip.logical) : std::optional<CBox>{clip.logical};
     }
-    CRegion opaqueRegion() override {
-        return inner->opaqueRegion().intersect(clip.logical);
+    CRegion opaqueRegion(Render::CRenderContext& ctx) override {
+        return inner->opaqueRegion(ctx).intersect(clip.logical);
     }
     const char* passName() override {
         return "CWorkspaceClipElement";
@@ -64,7 +69,8 @@ class CWorkspaceClipElement : public IPassElement {
     SWorkspaceClip   clip;
 };
 
-static void hkWindow(Render::IHyprRenderer* renderer, PHLWINDOW window, PHLMONITOR monitor, const Time::steady_tp& time, bool decorate, Render::eRenderPassMode mode,
+static void hkWindow(Render::IHyprRenderer* renderer, Render::CRenderContext& ctx, PHLWINDOW window, PHLMONITOR monitor,
+                     const Render::SWindowRenderPresentation& presentation, const Time::steady_tp& time, bool decorate, Render::eRenderPassMode mode,
                      bool ignorePosition, bool standalone) {
     const auto                    PREVIOUS = g_workspaceClip;
     Hyprutils::Utils::CScopeGuard restore([&] { g_workspaceClip = PREVIOUS; });
@@ -73,13 +79,13 @@ static void hkWindow(Render::IHyprRenderer* renderer, PHLWINDOW window, PHLMONIT
     // Captures and transformed windows render in their own coordinate space.
     // Ordinary scrolling windows must stay inside their moving workspace's
     // viewport, so off-screen columns cannot slide across its boundary.
-    if (!ignorePosition && !standalone && !window->m_isFloating && window->m_transformers.empty() && WORKSPACE && !WORKSPACE->m_isSpecialWorkspace &&
-        !WORKSPACE->m_forceRendering && WORKSPACE->m_renderOffset->isBeingAnimated() && WORKSPACE->m_space && WORKSPACE->m_space->algorithm() &&
-        dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(WORKSPACE->m_space->algorithm()->tiledAlgo().get())) {
-        const CBox LOGICAL = {WORKSPACE->m_renderOffset->value(), monitor->m_size};
+    if (!ctx.readOnlyEffects() && !presentation.workspaceScene && !ignorePosition && !standalone && !window->isFloating() && window->effects().transformers()->empty() && WORKSPACE && WORKSPACE->type() != Workspace::eWorkspaceType::SPECIAL &&
+        !WORKSPACE->m_forceRendering && presentation.workspaceOffsetAnimating && WORKSPACE->space() && WORKSPACE->space()->algorithm() &&
+        dynamic_cast<Layout::Tiled::CScrollingAlgorithm*>(WORKSPACE->space()->algorithm()->tiledAlgo().get())) {
+        const CBox LOGICAL = {presentation.workspaceOffset, monitor->m_size};
         g_workspaceClip    = SWorkspaceClip{LOGICAL, CBox{LOGICAL}.scale(monitor->m_scale).round()};
     }
-    rc<origWindow>(g_windowHook->m_original)(renderer, window, monitor, time, decorate, mode, ignorePosition, standalone);
+    rc<origWindow>(g_windowHook->m_original)(renderer, ctx, window, monitor, presentation, time, decorate, mode, ignorePosition, standalone);
 }
 
 static void hkAdd(Render::CRenderPass* pass, UP<IPassElement>&& element) {
@@ -88,24 +94,24 @@ static void hkAdd(Render::CRenderPass* pass, UP<IPassElement>&& element) {
     rc<origAdd>(g_addHook->m_original)(pass, std::move(element));
 }
 
-static void hkDraw(Render::IElementRenderer* renderer, WP<IPassElement> element, const CRegion& damage) {
+static void hkDraw(Render::IElementRenderer* renderer, Render::CRenderContext& ctx, WP<IPassElement> element, const CRegion& damage) {
     if (element && element->type() == EK_CUSTOM) {
         if (const auto CLIPPED = dynamic_cast<CWorkspaceClipElement*>(element.get())) {
             const auto DAMAGE = damage.copy().intersect(CLIPPED->clip.pixels);
             if (DAMAGE.empty()) {
-                CLIPPED->discard();
+                CLIPPED->discard(ctx);
                 return;
             }
             // Surface and texture rendering also read the current pass damage.
-            auto&                         data     = g_pHyprRenderer->m_renderData;
+            auto&                         data     = ctx.m_data;
             const auto                    PREVIOUS = data.damage.copy();
             Hyprutils::Utils::CScopeGuard restore([&] { data.damage = PREVIOUS; });
             data.damage = DAMAGE;
-            rc<origDraw>(g_drawHook->m_original)(renderer, CLIPPED->inner, DAMAGE);
+            rc<origDraw>(g_drawHook->m_original)(renderer, ctx, CLIPPED->inner, DAMAGE);
             return;
         }
     }
-    rc<origDraw>(g_drawHook->m_original)(renderer, element, damage);
+    rc<origDraw>(g_drawHook->m_original)(renderer, ctx, element, damage);
 }
 
 static CFunctionHook* createHook(const std::string& name, const std::string& signature, void* replacement) {
@@ -135,7 +141,7 @@ bool enableWorkspaceClip() {
 }
 
 void disableWorkspaceClip() {
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CWorkspaceClipElement");
+    g_pHyprRenderer->context().m_pass.removeAllOfType("CWorkspaceClipElement");
     if (g_drawHook)
         g_drawHook->unhook();
     if (g_addHook)
