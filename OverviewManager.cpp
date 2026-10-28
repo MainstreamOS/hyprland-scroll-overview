@@ -72,6 +72,13 @@ void unregisterScrollOverview(IOverview* overview) {
     if (!overview)
         return;
 
+    const auto IT = std::ranges::find_if(g_scrollOverviews, [overview](const auto& candidate) { return candidate.get() == overview; });
+    if (IT == g_scrollOverviews.end())
+        return;
+
+    // Destruction can report damage and re-enter the registry through hooks.
+    // Keep the overview alive until both the registry and context are updated.
+    const auto REMOVED = *IT;
     removeFromCrossMonitorDragSession(overview);
     std::erase_if(g_scrollOverviews, [overview](const auto& candidate) { return candidate.get() == overview; });
     g_pScrollOverview = activeScrollOverview();

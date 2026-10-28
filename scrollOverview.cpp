@@ -141,6 +141,24 @@ void removeOverview(IOverview* overview_) {
     }
 }
 
+// Removing the overview destroys it, so it is done from an idle source, once
+// the caller has unwound. The caller may still be using the overview: the
+// animation manager calls scale's onUpdate() right after its end callback.
+void CScrollOverview::scheduleCloseRemoval() {
+    if (closeRemovalIdle)
+        return;
+
+    closeRemovalIdle = wl_event_loop_add_idle(
+        g_pCompositor->m_wlEventLoop,
+        [](void* data) {
+            auto* const overview = sc<CScrollOverview*>(data);
+            overview->closeRemovalIdle = nullptr;
+            if (overview->closing && overview->closeRemovalPending && !overview->dragCancelledAwaitingRelease)
+                removeOverview(overview);
+        },
+        this);
+}
+
 static xkb_keysym_t getOverviewKeysym(const IKeyboard::SKeyEvent& event) {
     const auto PKEYBOARD = g_pSeatManager->m_keyboard.lock();
 
@@ -1219,6 +1237,11 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         if (info.cancelled)
             return;
 
+        // Extra buttons have no built-in overview action. Let Hyprland handle
+        // their bindings, including press/release and other bind flags.
+        if (event.button != BTN_LEFT && event.button != BTN_RIGHT && event.button != BTN_MIDDLE)
+            return;
+
         // If a native drag was not adopted, Hyprland must receive its release.
         if (!g_pointerGrabOverview && g_layoutManager && g_layoutManager->dragController()->target())
             return;
@@ -1240,16 +1263,8 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         const bool RELEASESPOINTERGRAB = event.state == WL_POINTER_BUTTON_STATE_RELEASED;
         auto       releasePointerGrab  = Hyprutils::Utils::CScopeGuard([this, RELEASESPOINTERGRAB] {
             if (RELEASESPOINTERGRAB && g_pointerGrabOverview == this) {
-                if (dragCancelledAwaitingRelease && closing && closeRemovalPending && !scale->isBeingAnimated() && !closeRemovalIdle)
-                    closeRemovalIdle = wl_event_loop_add_idle(
-                        g_pCompositor->m_wlEventLoop,
-                        [](void* data) {
-                            auto* const overview = sc<CScrollOverview*>(data);
-                            overview->closeRemovalIdle = nullptr;
-                            if (overview->closing && overview->closeRemovalPending && !overview->dragCancelledAwaitingRelease)
-                                removeOverview(overview);
-                        },
-                        this);
+                if (dragCancelledAwaitingRelease && closing && closeRemovalPending && !scale->isBeingAnimated())
+                    scheduleCloseRemoval();
 
                 dragCancelledAwaitingRelease = false;
                 dragAdoptedFromNative        = false;
@@ -5313,6 +5328,14 @@ void CScrollOverview::close(ECloseMode mode) {
     const bool PRESERVEMONITORSTATE = mode == ECloseMode::PRESERVE_MONITOR_STATE;
     const bool ACTIVATESELECTION    = !PRESERVEMONITORSTATE && activeScrollOverview().get() == this;
     const auto MONITOR              = pMonitor.lock();
+    // DPMS/output replacement may leave an overview referring to a monitor
+    // that no longer exists. Retire it without touching workspace state.
+    if (!MONITOR) {
+        closing = true;
+        closeRemovalPending = true;
+        scheduleCloseRemoval();
+        return;
+    }
     const auto SELECTEDWORKSPACE    = PRESERVEMONITORSTATE ?
         (MONITOR ? MONITOR->m_activeWorkspace : PHLWORKSPACE{}) :
         (viewportCurrentWorkspace < images.size() && images[viewportCurrentWorkspace] ? images[viewportCurrentWorkspace]->pWorkspace : PHLWORKSPACE{});
@@ -5353,7 +5376,7 @@ void CScrollOverview::close(ECloseMode mode) {
         closeRemovalPending = true;
         scale->setCallbackOnEnd([this](auto) {
             if (!dragCancelledAwaitingRelease)
-                removeOverview(this);
+                scheduleCloseRemoval();
         });
     };
 
@@ -5475,9 +5498,27 @@ void CScrollOverview::reopen() {
         return;
 
     scale->setCallbackOnEnd({});
+    if (closeRemovalIdle) {
+        wl_event_source_remove(closeRemovalIdle);
+        closeRemovalIdle = nullptr;
+    }
     closeApplied        = false;
     closeRemovalPending = false;
     setClosing(false);
+
+    // When all monitors were closing, the shared state may still belong to a
+    // closing instance. Let it hand ownership to an open overview again.
+    for (const auto& overview : scrollOverviews()) {
+        auto* owner = overview ? dynamic_cast<CScrollOverview*>(overview.get()) : nullptr;
+        if (owner && owner->sharedStateOwner && owner->closing) {
+            owner->transferSharedStateOwnership();
+            break;
+        }
+    }
+
+    usesSubmapKeybinds = hasOverviewSubmap();
+    if (usesSubmapKeybinds)
+        keyboardKeyHook.reset();
     activateSubmapIfConfigured();
     emitFullscreenVisibilityState(Desktop::focusState()->window(), true);
     *scale = ScrollOverview::Config::getScale(pMonitor.lock());
