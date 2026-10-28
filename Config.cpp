@@ -427,7 +427,7 @@ static void defineConfigValues() {
     addValue(makeShared<CBoolValue>("plugin:scrolloverview:shadow:enabled", "draw a shadow around each workspace card", false));
     addValue(makeShared<CIntValue>("plugin:scrolloverview:shadow:range", "workspace card shadow range", -1));
     addValue(makeShared<CIntValue>("plugin:scrolloverview:shadow:render_power", "workspace card shadow render power", -1));
-    addValue(makeShared<CGradientValue>("plugin:scrolloverview:shadow:color", "workspace card shadow color", -1));
+    addValue(makeShared<CGradientValue>("plugin:scrolloverview:shadow:color", "workspace card shadow color", CHyprColor(0, 0, 0, 0)));
 }
 
 static void initializeMonitorConfig() {
