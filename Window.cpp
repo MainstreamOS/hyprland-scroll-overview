@@ -3,6 +3,7 @@
 #include <cmath>
 #include <dlfcn.h>
 #include <functional>
+#include <list>
 #include <memory>
 #define private public
 #define protected public
@@ -66,22 +67,66 @@ struct SHyprbarGlobalStateMirror {
 };
 
 struct SOverviewButtonKey {
-    std::string icon   = "";
-    float       size   = 0.F;
-    CHyprColor  fgcol  = CHyprColor(0, 0, 0, 0);
-    CHyprColor  bgcol  = CHyprColor(0, 0, 0, 0);
-    bool        userfg = false;
+    std::string icon;
+    std::string font;
+    CHyprColor  color;
+    int         pointSize = 0;
+    int         maxWidth  = 0;
+
+    bool operator==(const SOverviewButtonKey&) const = default;
 };
 
-struct SOverviewButtonIconCache {
-    float                             scale       = 0.F;
-    float                             renderScale = 0.F;
-    std::string                       font        = "";
-    std::vector<SOverviewButtonKey>   keys;
-    std::vector<SP<Render::ITexture>> textures;
+struct SOverviewButtonIcon {
+    SOverviewButtonKey   key;
+    SP<Render::ITexture> texture;
 };
 
-static SOverviewButtonIconCache s_overviewButtonIconCache;
+// Key the actual raster size, not the continuously animated overview scale.
+// Keep several sizes so pinned windows and differently scaled monitors reuse
+// their own textures instead of replacing the regular workspace icons.
+static std::list<SOverviewButtonIcon> s_overviewButtonIcons;
+
+static SP<Render::ITexture> getOverviewButtonIcon(const SHyprbarButtonMirror& button, float pixelScale, const std::string& font) {
+    const float pixelSize = button.size * pixelScale;
+    if (button.icon.empty() || pixelSize <= 0.F)
+        return nullptr;
+
+    const SOverviewButtonKey key{
+        .icon      = button.icon,
+        .font      = font,
+        .color     = button.userfg ? button.fgcol :
+            (button.bgcol.r + button.bgcol.g + button.bgcol.b < 1.F) ? CHyprColor(0xFFFFFFFF) : CHyprColor(0xFF000000),
+        .pointSize = std::max(1, sc<int>(std::round(pixelSize * 0.62F))),
+        .maxWidth  = std::max(1, sc<int>(std::round(pixelSize))),
+    };
+
+    for (auto it = s_overviewButtonIcons.begin(); it != s_overviewButtonIcons.end(); ++it) {
+        if (it->key != key)
+            continue;
+        if (it->texture && it->texture->ok()) {
+            s_overviewButtonIcons.splice(s_overviewButtonIcons.begin(), s_overviewButtonIcons, it);
+            return s_overviewButtonIcons.front().texture;
+        }
+        s_overviewButtonIcons.erase(it);
+        break;
+    }
+
+    auto texture = g_pHyprRenderer->renderText(key.icon, key.color, key.pointSize, false, key.font, key.maxWidth);
+    if (!texture || !texture->ok())
+        return nullptr;
+
+    constexpr size_t MAX_CACHED_ICONS = 128;
+    s_overviewButtonIcons.push_front({key, texture});
+    if (s_overviewButtonIcons.size() > MAX_CACHED_ICONS)
+        s_overviewButtonIcons.pop_back();
+    return texture;
+}
+
+struct SOverviewButtonState {
+    float                size = 0.F;
+    SP<Render::ITexture> originalIcon;
+    SP<Render::ITexture> overviewIcon;
+};
 
 struct SOverviewWindowMetrics {
     float renderScale             = 1.F;
@@ -350,6 +395,23 @@ static SHyprbarGlobalStateMirror* getOverviewHyprbarGlobalState() {
     return STATEPTR->get();
 }
 
+static void restoreOverviewHyprbarButtons(const std::vector<SOverviewButtonState>& previousButtons) {
+    auto* const state = getOverviewHyprbarGlobalState();
+    if (!state)
+        return;
+
+    for (size_t i = 0; i < previousButtons.size() && i < state->buttons.size(); ++i) {
+        auto&       button   = state->buttons[i];
+        const auto& previous = previousButtons[i];
+        button.size = previous.size;
+        // Hyprbars updates its scale metadata when it regenerates a texture.
+        // If that happened during this draw, the old desktop texture no longer
+        // matches that metadata. Invalidate it so Hyprbars rebuilds both on its
+        // next draw, without relying on another plugin's private state layout.
+        button.iconTex = button.iconTex == previous.overviewIcon ? previous.originalIcon : nullptr;
+    }
+}
+
 static float getOverviewHyprbarLogicalHeight(const PHLWINDOW& window) {
     if (!window || !window->m_ruleApplicator->decorate().valueOrDefault())
         return 0.F;
@@ -558,69 +620,14 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
     const float monitorScale = monitor->m_scale;
     const float renderScale  = metrics.renderScale;
 
-    std::vector<float>                previousButtonSizes;
-    std::vector<SP<Render::ITexture>> previousButtonIcons;
+    std::vector<SOverviewButtonState> previousButtons;
     if (HYPRBARGLOBALSTATE) {
-        const size_t numButtons = HYPRBARGLOBALSTATE->buttons.size();
-        previousButtonSizes.reserve(numButtons);
-        previousButtonIcons.reserve(numButtons);
-
-        bool cacheMatches = (s_overviewButtonIconCache.textures.size() == numButtons) &&
-                            (std::abs(s_overviewButtonIconCache.scale - monitorScale) < 1e-4F) &&
-                            (std::abs(s_overviewButtonIconCache.renderScale - renderScale) < 1e-4F) &&
-                            (s_overviewButtonIconCache.font == barFont) &&
-                            (s_overviewButtonIconCache.keys.size() == numButtons);
-
-        if (cacheMatches) {
-            for (size_t i = 0; i < numButtons; ++i) {
-                const auto& b   = HYPRBARGLOBALSTATE->buttons[i];
-                const auto& key = s_overviewButtonIconCache.keys[i];
-                if (key.icon != b.icon || std::abs(key.size - b.size) >= 1e-4F || key.userfg != b.userfg ||
-                    key.fgcol != b.fgcol || key.bgcol != b.bgcol ||
-                    !s_overviewButtonIconCache.textures[i] || !s_overviewButtonIconCache.textures[i]->ok()) {
-                    cacheMatches = false;
-                    break;
-                }
-            }
-        }
-
-        if (!cacheMatches) {
-            s_overviewButtonIconCache.scale       = monitorScale;
-            s_overviewButtonIconCache.renderScale = renderScale;
-            s_overviewButtonIconCache.font        = barFont;
-            s_overviewButtonIconCache.keys.resize(numButtons);
-            s_overviewButtonIconCache.textures.resize(numButtons);
-
-            for (size_t i = 0; i < numButtons; ++i) {
-                const auto& b = HYPRBARGLOBALSTATE->buttons[i];
-                s_overviewButtonIconCache.keys[i] = SOverviewButtonKey{
-                    .icon   = b.icon,
-                    .size   = b.size,
-                    .fgcol  = b.fgcol,
-                    .bgcol  = b.bgcol,
-                    .userfg = b.userfg,
-                };
-
-                const float scaledButtonSize = b.size * renderScale * monitorScale;
-                if (!b.icon.empty() && scaledButtonSize > 0.F) {
-                    const int  pt    = std::max(1, sc<int>(std::round(scaledButtonSize * 0.62F)));
-                    auto       fgcol = b.userfg ? b.fgcol :
-                                       (b.bgcol.r + b.bgcol.g + b.bgcol.b < 1.F) ? CHyprColor(0xFFFFFFFF) : CHyprColor(0xFF000000);
-                    s_overviewButtonIconCache.textures[i] =
-                        g_pHyprRenderer->renderText(b.icon, fgcol, pt, false, barFont, sc<int>(std::round(scaledButtonSize)));
-                } else {
-                    s_overviewButtonIconCache.textures[i] = nullptr;
-                }
-            }
-        }
-
-        for (size_t i = 0; i < numButtons; ++i) {
-            auto& button = HYPRBARGLOBALSTATE->buttons[i];
-            previousButtonSizes.push_back(button.size);
-            previousButtonIcons.push_back(button.iconTex);
+        previousButtons.reserve(HYPRBARGLOBALSTATE->buttons.size());
+        for (auto& button : HYPRBARGLOBALSTATE->buttons) {
+            auto icon = getOverviewButtonIcon(button, renderScale * monitorScale, barFont);
+            previousButtons.push_back({button.size, button.iconTex, icon});
             button.size *= renderScale;
-            if (s_overviewButtonIconCache.textures[i] && s_overviewButtonIconCache.textures[i]->ok())
-                button.iconTex = s_overviewButtonIconCache.textures[i];
+            button.iconTex = std::move(icon);
         }
     }
     ScrollOverview::Config::setValue("plugin:hyprbars:bar_text_size", std::max(1, sc<int>(std::round(previousBarTextSize * metrics.renderScale))));
@@ -663,13 +670,7 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
             BORDER->m_borderSizeCacheDirty = previousBorderCacheDirty;
             BORDER->m_cachedBorderSize     = previousCachedBorderSize;
         }
-        if (HYPRBARGLOBALSTATE) {
-            for (size_t i = 0; i < previousButtonSizes.size() && i < HYPRBARGLOBALSTATE->buttons.size(); ++i) {
-                HYPRBARGLOBALSTATE->buttons[i].size = previousButtonSizes[i];
-                if (i < previousButtonIcons.size())
-                    HYPRBARGLOBALSTATE->buttons[i].iconTex = previousButtonIcons[i];
-            }
-        }
+        restoreOverviewHyprbarButtons(previousButtons);
         return;
     }
 
@@ -684,7 +685,7 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
 
     state.queuedAny = true;
     state.restoreFns.emplace_back([window, decoration, WORKSPACE, OVERRIDEWORKSPACEOFFSET, previousWindowPos, previousWindowSize, previousWorkspaceOffset, previousReply,
-                                   previousReplyData, previousBarTextSize, previousButtonPadding, previousBarPadding, previousButtonSizes, previousButtonIcons,
+                                   previousReplyData, previousBarTextSize, previousButtonPadding, previousBarPadding, previousButtons,
                                    previousRounding, previousBorderSize, previousBorderCacheDirty, previousCachedBorderSize] {
         if (!window || !decoration)
             return;
@@ -707,13 +708,7 @@ static void renderOverviewHyprbarDecoration(SOverviewCustomDecorationRenderState
             BORDER->m_borderSizeCacheDirty = previousBorderCacheDirty;
             BORDER->m_cachedBorderSize     = previousCachedBorderSize;
         }
-        if (auto* const HYPRBARGLOBALSTATE = getOverviewHyprbarGlobalState()) {
-            for (size_t i = 0; i < previousButtonSizes.size() && i < HYPRBARGLOBALSTATE->buttons.size(); ++i) {
-                HYPRBARGLOBALSTATE->buttons[i].size = previousButtonSizes[i];
-                if (i < previousButtonIcons.size())
-                    HYPRBARGLOBALSTATE->buttons[i].iconTex = previousButtonIcons[i];
-            }
-        }
+        restoreOverviewHyprbarButtons(previousButtons);
     });
 }
 
