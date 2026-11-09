@@ -84,8 +84,10 @@ class CScrollOverview : public IOverview {
     void   seedRememberedSelections();
     void   redrawAll(bool forcelowres = false);
     void   onWorkspaceChange();
-    void   renderGlobalWallpaper(PHLMONITOR monitor, const Time::steady_tp& now);
+    bool   renderCustomWallpaper(Render::CRenderContext& ctx, PHLMONITOR monitor);
+    void   renderGlobalWallpaper(Render::CRenderContext& ctx, PHLMONITOR monitor, const Time::steady_tp& now);
     void   renderWallpaperLayers(PHLMONITOR monitor, const CBox& workspaceBox, float renderScale, const Time::steady_tp& now, float alpha = 1.F);
+    void   renderWidgetLayers(PHLMONITOR monitor, const CBox& workspaceBox, float renderScale, const Time::steady_tp& now, float alpha = 1.F);
     void   updateBackdropBlurCache(PHLMONITOR monitor, int wallpaperMode, const Time::steady_tp& now);
     void   renderBackdropBlurCache(PHLMONITOR monitor);
     void   renderWorkspaceBackground(PHLMONITOR monitor, size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale, int wallpaperMode, const Time::steady_tp& now);
@@ -183,6 +185,7 @@ class CScrollOverview : public IOverview {
     bool   overviewBlurStateValid   = false;
     float  lastOverviewBlurScale    = 1.F;
     int    lastBackdropWallpaperMode = -1;
+    std::vector<std::pair<const void*, uint32_t>> lastBackdropWallpaperStack;
     Vector2D lastOverviewBlurViewOffset = Vector2D{};
     SP<Render::IFramebuffer> backdropBlurFB;
 
@@ -333,7 +336,7 @@ class CScrollOverview : public IOverview {
     bool                             swipe = false;
 
     // Custom-wallpaper backdrop (plugin:scrolloverview:wallpaper_path). Loaded
-    // lazily by renderGlobalWallpaper(), cached until the path config changes.
+    // lazily by renderCustomWallpaper(), cached until the path config changes.
     SP<Render::ITexture>             m_customWallpaperTex;
     SP<Render::ITexture>             m_customWallpaperBlurredTex;
     std::string                      m_lastLoadedWallpaperPath;

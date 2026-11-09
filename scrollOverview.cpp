@@ -3,6 +3,7 @@
 #include <any>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <dlfcn.h>
 #include <functional>
 #include <limits>
@@ -16,6 +17,7 @@
 #define private public
 #define protected public
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/SceneResources.hpp>
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
@@ -377,11 +379,15 @@ static CBox getOverviewGlobalBox(CBox globalBox, PHLMONITOR monitor, float scale
 }
 
 static CBox getOverviewWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float scale, const Vector2D& viewOffset, float offset, ScrollOverview::Config::ELayout layout,
-                                 bool round = true) {
+                                 bool round = true, bool includeDecorations = true) {
     if (!window)
         return {};
 
-    return getOverviewGlobalBox(window->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT), monitor, scale, viewOffset, offset, layout, round);
+    auto box = window->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    if (includeDecorations && g_pDecorationPositioner && window->m_ruleApplicator->decorate().valueOrDefault())
+        box.addExtents(g_pDecorationPositioner->getWindowDecorationExtents(window, true));
+
+    return getOverviewGlobalBox(box, monitor, scale, viewOffset, offset, layout, round);
 }
 
 static CBox getOverviewDragWindowBox(const PHLWINDOW& window, PHLMONITOR monitor, float scale, const Vector2D& viewOffset, float offset, ScrollOverview::Config::ELayout layout,
@@ -393,7 +399,7 @@ static CBox getOverviewDragWindowBox(const PHLWINDOW& window, PHLMONITOR monitor
     if (window->grouping().group() && TARGET)
         return getOverviewGlobalBox(TARGET->position(), monitor, scale, viewOffset, offset, layout, round);
 
-    return getOverviewWindowBox(window, monitor, scale, viewOffset, offset, layout, round);
+    return getOverviewWindowBox(window, monitor, scale, viewOffset, offset, layout, round, false);
 }
 
 static CBox expandOverviewWindowHitbox(CBox box, float scale, float monitorScale) {
@@ -452,22 +458,24 @@ static CBox getWorkspaceGlobalBox(PHLWORKSPACE workspace, PHLMONITOR fallbackMon
     return {MONITOR->m_position, MONITOR->m_size};
 }
 
-static CBox centerBoxInWorkspace(CBox box, PHLWORKSPACE workspace, PHLMONITOR fallbackMonitor) {
+static CBox centerBoxInWorkspace(CBox box, PHLWORKSPACE workspace, PHLMONITOR fallbackMonitor, const SBoxExtents& extents = {}) {
     const auto WORKSPACEBOX = getWorkspaceGlobalBox(workspace, fallbackMonitor);
     if (WORKSPACEBOX.width <= 0 || WORKSPACEBOX.height <= 0)
         return box;
 
+    box.addExtents(extents);
     box.x = WORKSPACEBOX.x + std::max(0.F, sc<float>(WORKSPACEBOX.width - box.width)) / 2.F;
     box.y = WORKSPACEBOX.y + std::max(0.F, sc<float>(WORKSPACEBOX.height - box.height)) / 2.F;
 
-    return box;
+    return box.addExtents(extents * -1.0);
 }
 
-static CBox clampBoxToWorkspace(CBox box, PHLWORKSPACE workspace, PHLMONITOR fallbackMonitor, float margin = 0.F) {
+static CBox clampBoxToWorkspace(CBox box, PHLWORKSPACE workspace, PHLMONITOR fallbackMonitor, float margin = 0.F, const SBoxExtents& extents = {}) {
     const auto WORKSPACEBOX = getWorkspaceGlobalBox(workspace, fallbackMonitor);
     if (WORKSPACEBOX.width <= 0 || WORKSPACEBOX.height <= 0)
         return box;
 
+    box.addExtents(extents);
     const float CLAMPMARGIN = std::max(0.F, margin);
     const float MINX        = WORKSPACEBOX.x + CLAMPMARGIN;
     const float MINY        = WORKSPACEBOX.y + CLAMPMARGIN;
@@ -477,7 +485,7 @@ static CBox clampBoxToWorkspace(CBox box, PHLWORKSPACE workspace, PHLMONITOR fal
     box.x = std::clamp(sc<float>(box.x), MINX, std::max(MINX, MAXX));
     box.y = std::clamp(sc<float>(box.y), MINY, std::max(MINY, MAXY));
 
-    return box;
+    return box.addExtents(extents * -1.0);
 }
 
 static CBox resizedOverviewBoxFromCorner(const CBox& originalBox, const Vector2D& delta, Layout::eRectCorner corner, const Vector2D& minSizePx,
@@ -727,6 +735,13 @@ static SOverviewShadowConfig getOverviewShadowConfig(PHLMONITOR monitor) {
 static void renderOverviewWorkspaceShadow(PHLMONITOR monitor, const CBox& workspaceBox, float overviewScale, bool cutoutCenter, float alpha = 1.F) {
     if (!monitor)
         return;
+
+    // Fade the card's shadow continuously between the desktop and overview,
+    // including when a gesture reverses before reaching either endpoint.
+    if (const auto targetScale = ScrollOverview::Config::getScale(monitor); targetScale < 1.F) {
+        const auto progress = std::clamp((1.F - overviewScale) / (1.F - targetScale), 0.F, 1.F);
+        alpha *= progress * progress * (3.F - 2.F * progress);
+    }
 
     const auto SHADOW = getOverviewShadowConfig(monitor);
     const bool HASVISIBLECOLOR = std::ranges::any_of(SHADOW.color.m_colors, [](const CHyprColor& color) { return color.a > 0.F; });
@@ -1671,13 +1686,15 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
             return;
 
         const auto KEYSYM = getOverviewKeysym(event);
+        if (KEYSYM == XKB_KEY_Escape && g_pointerGrabOverview && g_pointerGrabOverview->dragActiveWindow)
+            return;
         if (activeScrollOverview().get() != this || isTopLayerFocused(pMonitor.lock()))
             return;
         const auto IGNOREDMODS = Input::HL_MODIFIER_CAPS | Input::HL_MODIFIER_MOD2;
         const auto MODS = sc<Input::ModifierMask>(sc<uint8_t>(g_pInputManager->getModsFromAllKBs()) & ~sc<uint8_t>(IGNOREDMODS));
 
         if ((KEYSYM == XKB_KEY_Return || KEYSYM == XKB_KEY_KP_Enter || KEYSYM == XKB_KEY_Left || KEYSYM == XKB_KEY_KP_Left || KEYSYM == XKB_KEY_Right ||
-             KEYSYM == XKB_KEY_KP_Right || KEYSYM == XKB_KEY_Up || KEYSYM == XKB_KEY_KP_Up || KEYSYM == XKB_KEY_Down || KEYSYM == XKB_KEY_KP_Down) &&
+             KEYSYM == XKB_KEY_KP_Right || KEYSYM == XKB_KEY_Up || KEYSYM == XKB_KEY_KP_Up || KEYSYM == XKB_KEY_Down || KEYSYM == XKB_KEY_KP_Down || KEYSYM == XKB_KEY_Escape) &&
             MODS != Input::HL_MODIFIER_NONE)
             return;
 
@@ -1699,7 +1716,8 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
                 moveSelection("down");
                 break;
             case XKB_KEY_Return:
-            case XKB_KEY_KP_Enter: closeAll(); break;
+            case XKB_KEY_KP_Enter:
+            case XKB_KEY_Escape: closeAll(); break;
             default: return;
         }
 
@@ -1741,15 +1759,128 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     syncSelectionToViewport();
 }
 
-static void renderOverviewLayerLevel(PHLMONITOR monitor, uint32_t layer, const CBox& workspaceBox, float renderScale, const Time::steady_tp& now, float alpha = 1.F) {
-    if (!monitor)
+// A layer surface is a wallpaper candidate when it covers the whole monitor and reserves no exclusive zone.
+// Everything else on the BACKGROUND and BOTTOM layers is a widget and is drawn per card.
+// Layer geometry comes from m_geometry (the arrangeLayersForMonitor() result), not logicalBox(). logicalBox()
+// returns nullopt for surfaces with no input region or zero alpha, which would hide a valid wallpaper.
+static bool layerSurfaceCoversMonitor(const PHLLS& ls, PHLMONITOR monitor) {
+    // m_geometry is in global layout coordinates, so compare against the monitor's position, not the origin.
+    const CBox& GEOM = ls->m_geometry;
+    constexpr double EPSILON = 0.5;
+    return std::abs(GEOM.x - monitor->m_position.x) < EPSILON && std::abs(GEOM.y - monitor->m_position.y) < EPSILON && GEOM.w + EPSILON >= monitor->m_size.x &&
+        GEOM.h + EPSILON >= monitor->m_size.y;
+}
+
+static int32_t layerSurfaceExclusiveZone(const PHLLS& ls) {
+    const auto RESOURCE = ls->m_layerSurface.lock();
+    return RESOURCE ? RESOURCE->m_current.exclusive : 0;
+}
+
+static bool wallpaperDebugEnabled() {
+    static const bool ENABLED = [] {
+        const char* value = std::getenv("SCROLLOVERVIEW_DEBUG_WALLPAPER");
+        return value && *value && std::string_view{value} != "0";
+    }();
+    return ENABLED;
+}
+
+static std::unordered_map<std::string, std::string> s_lastWallpaperDebugLog;
+
+static void logWallpaperDetection(PHLMONITOR monitor, const std::vector<PHLLS>& wallpapers) {
+    const auto describe = [](const PHLLS& ls) {
+        const CBox& BOX  = ls->m_geometry;
+        const auto  GEOM = std::format("{:.0f},{:.0f} {:.0f}x{:.0f}", BOX.x, BOX.y, BOX.w, BOX.h);
+        return std::format("'{}' layer={} geom={} exclusive={}", ls->m_namespace, ls->m_layer, GEOM, layerSurfaceExclusiveZone(ls));
+    };
+
+    std::string summary = "wallpapers:";
+    for (const auto& ls : wallpapers)
+        summary += std::format(" [{}]", describe(ls));
+
+    summary += " widgets:";
+    for (const auto LAYER : {ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM}) {
+        for (const auto& ref : monitor->m_layerSurfaceLayers[LAYER]) {
+            const auto ls = ref.lock();
+            if (!Desktop::View::validMapped(ls) || std::find(wallpapers.begin(), wallpapers.end(), ls) != wallpapers.end())
+                continue;
+            summary += std::format(" [{}]", describe(ls));
+        }
+    }
+
+    auto& last = s_lastWallpaperDebugLog[monitor->m_name];
+    if (last == summary)
         return;
+
+    last = summary;
+    std::fprintf(stderr, "[scrolloverview] monitor %s %s\n", monitor->m_name.c_str(), summary.c_str());
+}
+
+static std::vector<PHLLS> detectWallpaperSurfaces(PHLMONITOR monitor) {
+    std::vector<PHLLS> wallpapers;
+    if (!monitor)
+        return wallpapers;
+
+    const auto LAYERCFG      = ScrollOverview::Config::getWallpaperLayer(monitor);
+    const bool SCANBACKGROUND = LAYERCFG != ScrollOverview::Config::EWallpaperLayer::BOTTOM;
+    const bool SCANBOTTOM     = LAYERCFG != ScrollOverview::Config::EWallpaperLayer::BACKGROUND;
+
+    for (const auto LAYER : {ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM}) {
+        if ((LAYER == ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND && !SCANBACKGROUND) || (LAYER == ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM && !SCANBOTTOM))
+            continue;
+
+        for (const auto& ref : monitor->m_layerSurfaceLayers[LAYER]) {
+            const auto ls = ref.lock();
+            if (!Desktop::View::validMapped(ls) || !layerSurfaceCoversMonitor(ls, monitor) || layerSurfaceExclusiveZone(ls) > 0)
+                continue;
+
+            wallpapers.emplace_back(ls);
+        }
+    }
+
+    if (wallpaperDebugEnabled())
+        logWallpaperDetection(monitor, wallpapers);
+
+    return wallpapers;
+}
+
+static bool isWallpaperSurface(const PHLLS& ls, PHLMONITOR monitor) {
+    const auto WALLPAPERS = detectWallpaperSurfaces(monitor);
+    return std::find(WALLPAPERS.begin(), WALLPAPERS.end(), ls) != WALLPAPERS.end();
+}
+
+// Widgets are every mapped BACKGROUND or BOTTOM surface that is not part of the wallpaper stack.
+static std::vector<PHLLS> collectOverviewWidgets(PHLMONITOR monitor) {
+    std::vector<PHLLS> widgets;
+    if (!monitor)
+        return widgets;
+
+    const auto WALLPAPERS = detectWallpaperSurfaces(monitor);
+    for (const auto LAYER : {ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM}) {
+        for (const auto& ref : monitor->m_layerSurfaceLayers[LAYER]) {
+            const auto ls = ref.lock();
+            if (!Desktop::View::validMapped(ls) || std::find(WALLPAPERS.begin(), WALLPAPERS.end(), ls) != WALLPAPERS.end())
+                continue;
+
+            widgets.emplace_back(ls);
+        }
+    }
+
+    return widgets;
+}
+
+static void renderOverviewSurfaces(PHLMONITOR monitor, const std::vector<PHLLS>& surfaces, const CBox& workspaceBox, float renderScale, const Time::steady_tp& now,
+                                   float alpha = 1.F) {
+    if (!monitor || surfaces.empty())
+        return;
+
+    // Hyprland culls earlier pass elements under an opaque surface using its unscaled opaque region.
+    // A full-monitor surface would hide anything queued before it (the wallpaper or the global pass), so flush first.
+    OverviewRender::flushPass(g_pHyprRenderer->context(), monitor);
 
     bool pushedRenderHints = false;
     const bool MODULATEALPHA = alpha < 0.999F;
 
-    for (auto const& ls : monitor->m_layerSurfaceLayers[layer]) {
-        const auto LAYER = ls.lock();
+    for (auto const& LAYER : surfaces) {
         if (!Desktop::View::validMapped(LAYER))
             continue;
 
@@ -1762,28 +1893,28 @@ static void renderOverviewLayerLevel(PHLMONITOR monitor, uint32_t layer, const C
             pushedRenderHints = true;
         }
 
-		auto& lsAlpha = LAYER->alpha()[Desktop::View::LS_ALPHA_FADE];
-        float previousAlpha = 1.F;
-        if (MODULATEALPHA && lsAlpha->value()) {
-            previousAlpha = lsAlpha->value();
-            lsAlpha->setValueAndWarp(previousAlpha * std::clamp(alpha, 0.F, 1.F));
-        }
+        auto&      layerAlpha    = LAYER->alpha()[Desktop::View::LS_ALPHA_FADE]->value();
+        const auto PREVIOUSALPHA = layerAlpha;
+        if (MODULATEALPHA)
+            layerAlpha *= std::clamp(alpha, 0.F, 1.F);
 
         g_pHyprRenderer->renderLayer(g_pHyprRenderer->context(), LAYER, monitor, now);
 
-        if (MODULATEALPHA && lsAlpha->value())
-            lsAlpha->setValueAndWarp(previousAlpha);
+        if (MODULATEALPHA)
+            layerAlpha = PREVIOUSALPHA;
     }
 
     if (pushedRenderHints)
         Render::IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{.renderModif = Render::SRenderModifData{}}));
+
+    OverviewRender::flushPass(g_pHyprRenderer->context(), monitor);
 }
 
 void CScrollOverview::renderWallpaperLayers(PHLMONITOR monitor, const CBox& workspaceBox, float renderScale, const Time::steady_tp& now, float alpha) {
     if (!monitor)
         return;
 
-    renderOverviewLayerLevel(monitor, ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, workspaceBox, renderScale, now, alpha);
+    renderOverviewSurfaces(monitor, detectWallpaperSurfaces(monitor), workspaceBox, renderScale, now, alpha);
 }
 
 // Separable box blur with a sliding-window running sum: O(W*H) per axis,
@@ -1845,167 +1976,158 @@ static void boxBlurVertical(const uint8_t* src, uint8_t* dst, int W, int H, int 
     }
 }
 
-void CScrollOverview::renderGlobalWallpaper(PHLMONITOR monitor, const Time::steady_tp& now) {
-    if (!monitor)
-        return;
+void CScrollOverview::renderWidgetLayers(PHLMONITOR monitor, const CBox& workspaceBox, float renderScale, const Time::steady_tp& now, float alpha) {
+    renderOverviewSurfaces(monitor, collectOverviewWidgets(monitor), workspaceBox, renderScale, now, alpha);
+}
 
-    // Configurable image-file backdrop. When plugin:scrolloverview:wallpaper_path
-    // is set, source the global wallpaper from disk instead of from a
-    // wlr-layer-shell BACKGROUND surface. The layer-iteration path below is only
-    // reliable when a dedicated wallpaper daemon (hyprpaper, swww) exposes a
-    // stable surface texture; Quickshell/Qt-painted setups (dots-hyprland)
-    // produce transient buffers that read as garbage when sampled mid-render.
-    // Cached; reloaded only when the path changes.
-    //
-    // Blur is baked into a CPU-pre-blurred texture below rather than via
-    // Hyprland's GL blur (updateBackdropBlurCache -> blurFramebuffer), which
-    // produces GPU noise against this texture — render() routes custom
-    // wallpapers straight here and skips the GL blur cache.
+bool CScrollOverview::renderCustomWallpaper(Render::CRenderContext& ctx, PHLMONITOR monitor) {
+    // An explicit image keeps the same backdrop even when the shell layer changes.
+    // Its CPU blur avoids GPU noise on the uploaded texture.
     const std::string CONFIGUREDPATH = ScrollOverview::Config::getWallpaperPath(monitor);
-    if (!CONFIGUREDPATH.empty()) {
-        const bool WANTBLUR = ScrollOverview::Config::getBlur(monitor);
+    if (CONFIGUREDPATH.empty())
+        return false;
 
-        if (m_lastLoadedWallpaperPath != CONFIGUREDPATH) {
-            m_customWallpaperTex.reset();
-            m_customWallpaperBlurredTex.reset();
-            m_lastLoadedWallpaperPath = CONFIGUREDPATH;
-        }
+    const bool WANTBLUR = ScrollOverview::Config::getBlur(monitor);
 
-        if (!m_customWallpaperTex || (WANTBLUR && !m_customWallpaperBlurredTex)) {
-            // gdk-pixbuf loads JPG/PNG/WebP/etc. into a CAIRO_FORMAT_ARGB32
-            // surface. Pixbuf is RGB[A] byte order; cairo on little-endian wants
-            // BGRA — swap during copy and force opaque alpha.
-            cairo_surface_t* SURF   = nullptr;
-            GError*          PIXERR = nullptr;
-            GdkPixbuf*       PIXBUF = gdk_pixbuf_new_from_file(CONFIGUREDPATH.c_str(), &PIXERR);
-            if (PIXERR)
-                g_error_free(PIXERR);
-            if (PIXBUF) {
-                const int     PW    = gdk_pixbuf_get_width(PIXBUF);
-                const int     PH    = gdk_pixbuf_get_height(PIXBUF);
-                const int     PCH   = gdk_pixbuf_get_n_channels(PIXBUF);
-                const int     PROW  = gdk_pixbuf_get_rowstride(PIXBUF);
-                const guchar* PDATA = gdk_pixbuf_read_pixels(PIXBUF);
-                if (PW > 0 && PH > 0 && PCH >= 3 && PDATA) {
-                    SURF = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, PW, PH);
-                    if (SURF && cairo_surface_status(SURF) == CAIRO_STATUS_SUCCESS) {
-                        cairo_surface_flush(SURF);
-                        const int CSTRIDE = cairo_image_surface_get_stride(SURF);
-                        uint8_t*  CPIXELS = cairo_image_surface_get_data(SURF);
-                        for (int y = 0; y < PH; ++y) {
-                            const guchar* srcRow = &PDATA[y * PROW];
-                            uint8_t*      dstRow = &CPIXELS[y * CSTRIDE];
-                            for (int x = 0; x < PW; ++x) {
-                                const guchar* sp = &srcRow[x * PCH];
-                                uint8_t*      dp = &dstRow[x * 4];
-                                dp[0] = sp[2];                 // B <- R
-                                dp[1] = sp[1];                 // G <- G
-                                dp[2] = sp[0];                 // R <- B
-                                dp[3] = (PCH == 4) ? sp[3] : 0xFF;
-                            }
-                        }
-                        cairo_surface_mark_dirty(SURF);
-                    }
-                }
-                g_object_unref(PIXBUF);
-            }
-            if (SURF && cairo_surface_status(SURF) == CAIRO_STATUS_SUCCESS) {
-                const int W      = cairo_image_surface_get_width(SURF);
-                const int H      = cairo_image_surface_get_height(SURF);
-                const int STRIDE = cairo_image_surface_get_stride(SURF);
-                uint8_t*  PIXELS = cairo_image_surface_get_data(SURF);
-                if (W > 0 && H > 0 && PIXELS) {
-                    if (!m_customWallpaperTex)
-                        m_customWallpaperTex = makeShared<Render::GL::CGLTexture>(DRM_FORMAT_XRGB8888, PIXELS, sc<uint32_t>(STRIDE), Vector2D{sc<double>(W), sc<double>(H)});
-
-                    // CPU pre-blur for blur=true: cairo bilinear downscale to
-                    // 1/4, three iterations of separable box blur (~Gaussian),
-                    // cairo bilinear upscale back. Runs once per path change.
-                    if (WANTBLUR && !m_customWallpaperBlurredTex) {
-                        const int     SMALL_W    = std::max(8, W / 4);
-                        const int     SMALL_H    = std::max(8, H / 4);
-                        constexpr int BOX_RADIUS = 8;
-                        constexpr int BOX_PASSES = 3;
-
-                        cairo_surface_t* SMALL   = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, SMALL_W, SMALL_H);
-                        cairo_t*         CRSMALL = cairo_create(SMALL);
-                        cairo_scale(CRSMALL, (double)SMALL_W / W, (double)SMALL_H / H);
-                        cairo_set_source_surface(CRSMALL, SURF, 0, 0);
-                        cairo_pattern_set_filter(cairo_get_source(CRSMALL), CAIRO_FILTER_BILINEAR);
-                        cairo_paint(CRSMALL);
-                        cairo_destroy(CRSMALL);
-
-                        cairo_surface_flush(SMALL);
-                        const int            SMALL_STRIDE = cairo_image_surface_get_stride(SMALL);
-                        uint8_t*             SMALL_PIXELS = cairo_image_surface_get_data(SMALL);
-                        std::vector<uint8_t> AUX(SMALL_H * SMALL_STRIDE, 0);
-                        for (int pass = 0; pass < BOX_PASSES; ++pass) {
-                            boxBlurHorizontal(SMALL_PIXELS, AUX.data(), SMALL_W, SMALL_H, SMALL_STRIDE, BOX_RADIUS);
-                            boxBlurVertical(AUX.data(), SMALL_PIXELS, SMALL_W, SMALL_H, SMALL_STRIDE, BOX_RADIUS);
-                        }
-                        cairo_surface_mark_dirty(SMALL);
-
-                        cairo_surface_t* BIG   = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, W, H);
-                        cairo_t*         CRBIG = cairo_create(BIG);
-                        cairo_scale(CRBIG, (double)W / SMALL_W, (double)H / SMALL_H);
-                        cairo_set_source_surface(CRBIG, SMALL, 0, 0);
-                        cairo_pattern_set_filter(cairo_get_source(CRBIG), CAIRO_FILTER_BILINEAR);
-                        cairo_paint(CRBIG);
-                        cairo_destroy(CRBIG);
-                        cairo_surface_destroy(SMALL);
-
-                        cairo_surface_flush(BIG);
-                        const int B_STRIDE = cairo_image_surface_get_stride(BIG);
-                        uint8_t*  B_PIXELS = cairo_image_surface_get_data(BIG);
-                        for (int y = 0; y < H; ++y)
-                            for (int x = 0; x < W; ++x)
-                                B_PIXELS[y * B_STRIDE + x * 4 + 3] = 0xFF;
-                        cairo_surface_mark_dirty(BIG);
-
-                        m_customWallpaperBlurredTex = makeShared<Render::GL::CGLTexture>(DRM_FORMAT_XRGB8888, B_PIXELS, sc<uint32_t>(B_STRIDE), Vector2D{sc<double>(W), sc<double>(H)});
-                        cairo_surface_destroy(BIG);
-                    }
-                }
-            }
-            if (SURF)
-                cairo_surface_destroy(SURF);
-        }
-
-        const SP<Render::ITexture> TEX = (WANTBLUR && m_customWallpaperBlurredTex) ? m_customWallpaperBlurredTex : m_customWallpaperTex;
-        if (TEX && TEX->m_size.x > 0 && TEX->m_size.y > 0) {
-            // Cover-fit: fill the monitor preserving aspect ratio, centered.
-            //
-            // The transformed size, because that is the space this pass draws
-            // in (see OverviewRender::flushPass). A quarter-turned output has
-            // its axes exchanged there while the panel's own mode does not, so
-            // fitting to the mode would size the picture for a landscape screen
-            // and then paint it onto a portrait one.
-            const Vector2D MSIZE        = monitor->m_transformedSize;
-            const Vector2D TSIZE        = TEX->m_size;
-            const float    COVERSCALE   = std::max(MSIZE.x / TSIZE.x, MSIZE.y / TSIZE.y);
-            const Vector2D RENDEREDSIZE = TSIZE * COVERSCALE;
-            const Vector2D OFFSET       = (MSIZE - RENDEREDSIZE) / 2.0;
-            const CBox     BOX          = {OFFSET.x, OFFSET.y, RENDEREDSIZE.x, RENDEREDSIZE.y};
-            const CRegion  DAMAGE{CBox{0, 0, MSIZE.x, MSIZE.y}};
-            g_pHyprRenderer->draw(g_pHyprRenderer->context(),
-                CTexPassElement::SRenderData{
-                    .tex    = TEX,
-                    .box    = BOX,
-                    .damage = DAMAGE,
-                },
-                DAMAGE);
-            return;
-        }
-        // Texture failed to load — fall through to the default backdrop.
+    if (m_lastLoadedWallpaperPath != CONFIGUREDPATH) {
+        m_customWallpaperTex.reset();
+        m_customWallpaperBlurredTex.reset();
+        m_lastLoadedWallpaperPath = CONFIGUREDPATH;
     }
 
-    g_pHyprRenderer->renderBackground(g_pHyprRenderer->context(), monitor);
+    if (!m_customWallpaperTex || (WANTBLUR && !m_customWallpaperBlurredTex)) {
+        // gdk-pixbuf loads JPG/PNG/WebP/etc. into a CAIRO_FORMAT_ARGB32
+        // surface. Pixbuf is RGB[A] byte order; cairo on little-endian wants
+        // BGRA — swap during copy and force opaque alpha.
+        cairo_surface_t* SURF   = nullptr;
+        GError*          PIXERR = nullptr;
+        GdkPixbuf*       PIXBUF = gdk_pixbuf_new_from_file(CONFIGUREDPATH.c_str(), &PIXERR);
+        if (PIXERR)
+            g_error_free(PIXERR);
+        if (PIXBUF) {
+            const int     PW    = gdk_pixbuf_get_width(PIXBUF);
+            const int     PH    = gdk_pixbuf_get_height(PIXBUF);
+            const int     PCH   = gdk_pixbuf_get_n_channels(PIXBUF);
+            const int     PROW  = gdk_pixbuf_get_rowstride(PIXBUF);
+            const guchar* PDATA = gdk_pixbuf_read_pixels(PIXBUF);
+            if (PW > 0 && PH > 0 && PCH >= 3 && PDATA) {
+                SURF = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, PW, PH);
+                if (SURF && cairo_surface_status(SURF) == CAIRO_STATUS_SUCCESS) {
+                    cairo_surface_flush(SURF);
+                    const int CSTRIDE = cairo_image_surface_get_stride(SURF);
+                    uint8_t*  CPIXELS = cairo_image_surface_get_data(SURF);
+                    for (int y = 0; y < PH; ++y) {
+                        const guchar* srcRow = &PDATA[y * PROW];
+                        uint8_t*      dstRow = &CPIXELS[y * CSTRIDE];
+                        for (int x = 0; x < PW; ++x) {
+                            const guchar* sp = &srcRow[x * PCH];
+                            uint8_t*      dp = &dstRow[x * 4];
+                            dp[0] = sp[2];                 // B <- R
+                            dp[1] = sp[1];                 // G <- G
+                            dp[2] = sp[0];                 // R <- B
+                            dp[3] = (PCH == 4) ? sp[3] : 0xFF;
+                        }
+                    }
+                    cairo_surface_mark_dirty(SURF);
+                }
+            }
+            g_object_unref(PIXBUF);
+        }
+        if (SURF && cairo_surface_status(SURF) == CAIRO_STATUS_SUCCESS) {
+            const int W      = cairo_image_surface_get_width(SURF);
+            const int H      = cairo_image_surface_get_height(SURF);
+            const int STRIDE = cairo_image_surface_get_stride(SURF);
+            uint8_t*  PIXELS = cairo_image_surface_get_data(SURF);
+            if (W > 0 && H > 0 && PIXELS) {
+                if (!m_customWallpaperTex)
+                    m_customWallpaperTex = makeShared<Render::GL::CGLTexture>(DRM_FORMAT_XRGB8888, PIXELS, sc<uint32_t>(STRIDE), Vector2D{sc<double>(W), sc<double>(H)});
 
-    for (auto const& ls : monitor->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND]) {
-        if (!Desktop::View::validMapped(ls.lock()))
-            continue;
+                // CPU pre-blur for blur=true: cairo bilinear downscale to
+                // 1/4, three iterations of separable box blur (~Gaussian),
+                // cairo bilinear upscale back. Runs once per path change.
+                if (WANTBLUR && !m_customWallpaperBlurredTex) {
+                    const int     SMALL_W    = std::max(8, W / 4);
+                    const int     SMALL_H    = std::max(8, H / 4);
+                    constexpr int BOX_RADIUS = 8;
+                    constexpr int BOX_PASSES = 3;
 
-        g_pHyprRenderer->renderLayer(g_pHyprRenderer->context(), ls.lock(), monitor, now);
+                    cairo_surface_t* SMALL   = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, SMALL_W, SMALL_H);
+                    cairo_t*         CRSMALL = cairo_create(SMALL);
+                    cairo_scale(CRSMALL, (double)SMALL_W / W, (double)SMALL_H / H);
+                    cairo_set_source_surface(CRSMALL, SURF, 0, 0);
+                    cairo_pattern_set_filter(cairo_get_source(CRSMALL), CAIRO_FILTER_BILINEAR);
+                    cairo_paint(CRSMALL);
+                    cairo_destroy(CRSMALL);
+
+                    cairo_surface_flush(SMALL);
+                    const int            SMALL_STRIDE = cairo_image_surface_get_stride(SMALL);
+                    uint8_t*             SMALL_PIXELS = cairo_image_surface_get_data(SMALL);
+                    std::vector<uint8_t> AUX(SMALL_H * SMALL_STRIDE, 0);
+                    for (int pass = 0; pass < BOX_PASSES; ++pass) {
+                        boxBlurHorizontal(SMALL_PIXELS, AUX.data(), SMALL_W, SMALL_H, SMALL_STRIDE, BOX_RADIUS);
+                        boxBlurVertical(AUX.data(), SMALL_PIXELS, SMALL_W, SMALL_H, SMALL_STRIDE, BOX_RADIUS);
+                    }
+                    cairo_surface_mark_dirty(SMALL);
+
+                    cairo_surface_t* BIG   = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, W, H);
+                    cairo_t*         CRBIG = cairo_create(BIG);
+                    cairo_scale(CRBIG, (double)W / SMALL_W, (double)H / SMALL_H);
+                    cairo_set_source_surface(CRBIG, SMALL, 0, 0);
+                    cairo_pattern_set_filter(cairo_get_source(CRBIG), CAIRO_FILTER_BILINEAR);
+                    cairo_paint(CRBIG);
+                    cairo_destroy(CRBIG);
+                    cairo_surface_destroy(SMALL);
+
+                    cairo_surface_flush(BIG);
+                    const int B_STRIDE = cairo_image_surface_get_stride(BIG);
+                    uint8_t*  B_PIXELS = cairo_image_surface_get_data(BIG);
+                    for (int y = 0; y < H; ++y)
+                        for (int x = 0; x < W; ++x)
+                            B_PIXELS[y * B_STRIDE + x * 4 + 3] = 0xFF;
+                    cairo_surface_mark_dirty(BIG);
+
+                    m_customWallpaperBlurredTex = makeShared<Render::GL::CGLTexture>(DRM_FORMAT_XRGB8888, B_PIXELS, sc<uint32_t>(B_STRIDE), Vector2D{sc<double>(W), sc<double>(H)});
+                    cairo_surface_destroy(BIG);
+                }
+            }
+        }
+        if (SURF)
+            cairo_surface_destroy(SURF);
+    }
+
+    const SP<Render::ITexture> TEX = (WANTBLUR && m_customWallpaperBlurredTex) ? m_customWallpaperBlurredTex : m_customWallpaperTex;
+    if (TEX && TEX->m_size.x > 0 && TEX->m_size.y > 0) {
+        // Cover-fit: fill the monitor preserving aspect ratio, centered.
+        //
+        // The transformed size, because that is the space this pass draws
+        // in (see OverviewRender::flushPass). A quarter-turned output has
+        // its axes exchanged there while the panel's own mode does not, so
+        // fitting to the mode would size the picture for a landscape screen
+        // and then paint it onto a portrait one.
+        const Vector2D MSIZE        = monitor->m_transformedSize;
+        const Vector2D TSIZE        = TEX->m_size;
+        const float    COVERSCALE   = std::max(MSIZE.x / TSIZE.x, MSIZE.y / TSIZE.y);
+        const Vector2D RENDEREDSIZE = TSIZE * COVERSCALE;
+        const Vector2D OFFSET       = (MSIZE - RENDEREDSIZE) / 2.0;
+        const CBox     BOX          = {OFFSET.x, OFFSET.y, RENDEREDSIZE.x, RENDEREDSIZE.y};
+        const CRegion  DAMAGE{CBox{0, 0, MSIZE.x, MSIZE.y}};
+        g_pHyprRenderer->draw(ctx,
+            CTexPassElement::SRenderData{
+                .tex    = TEX,
+                .box    = BOX,
+                .damage = DAMAGE,
+            },
+            DAMAGE);
+        return true;
+    }
+    return false;
+}
+
+void CScrollOverview::renderGlobalWallpaper(Render::CRenderContext& ctx, PHLMONITOR monitor, const Time::steady_tp& now) {
+    g_pHyprRenderer->renderBackground(ctx, monitor);
+
+    for (auto const& ls : detectWallpaperSurfaces(monitor)) {
+        g_pHyprRenderer->renderLayer(ctx, ls, monitor, now);
     }
 }
 
@@ -2013,14 +2135,25 @@ void CScrollOverview::updateBackdropBlurCache(PHLMONITOR monitor, int wallpaperM
     if (!monitor || wallpaperMode == 1 || !ScrollOverview::Config::getBlur(pMonitor.lock()))
         return;
 
-    if (lastBackdropWallpaperMode != wallpaperMode) {
-        backdropBlurDirty         = true;
-        lastBackdropWallpaperMode = wallpaperMode;
+    // The cache holds the wallpaper stack, so it must rebuild when the mode or the detected surfaces (or their layers) change.
+    std::vector<std::pair<const void*, uint32_t>> wallpaperStack;
+    for (const auto& ls : detectWallpaperSurfaces(monitor))
+        wallpaperStack.emplace_back(ls.get(), ls->m_layer);
+
+    if (lastBackdropWallpaperMode != wallpaperMode || lastBackdropWallpaperStack != wallpaperStack) {
+        backdropBlurDirty           = true;
+        lastBackdropWallpaperMode   = wallpaperMode;
+        lastBackdropWallpaperStack  = std::move(wallpaperStack);
     }
+
+    auto&      monitorContext = g_pHyprRenderer->context();
+    if (!monitorContext.m_data.currentFB)
+        return;
 
     const auto FBSIZE     = monitor->m_transformedSize;
     const auto RENDERSIZE = monitor->m_transformedSize;
-    const auto FBFORMAT   = g_pHyprRenderer->context().m_data.currentFB->m_drmFormat;
+    const auto FBFORMAT  = monitorContext.m_data.currentFB->m_drmFormat;
+    const auto DESC      = NColorManagement::getDefaultImageDescription();
     if (!backdropBlurFB)
         backdropBlurFB = g_pHyprRenderer->createFB("scrolloverview_backdrop_blur");
 
@@ -2032,36 +2165,62 @@ void CScrollOverview::updateBackdropBlurCache(PHLMONITOR monitor, int wallpaperM
         backdropBlurDirty = true;
     }
 
+    if (backdropBlurFB->imageDescription() != DESC)
+        backdropBlurDirty = true;
+
     if (!backdropBlurDirty)
         return;
 
-    if (g_pHyprRenderer->context().m_data.currentFB)
-        backdropBlurFB->setImageDescription(g_pHyprRenderer->context().m_data.currentFB->imageDescription());
+    // Cache the wallpaper and blur before monitor HDR mapping. Reusing an HDR work-buffer
+    // texture skips CM when compositing it, copying HDR values into the SDR mirror as well.
+    // An explicit SDR scene also keeps the blur provider's scratch buffers in this space.
+    backdropBlurFB->setImageDescription(DESC);
+    auto resources = makeShared<Render::CSceneResources>(nullptr, Render::SSceneBufferDescription{.format = FBFORMAT, .imageDescription = DESC});
+    Render::CRenderContext cacheContext;
+    if (!cacheContext.begin(resources))
+        return;
+
+    cacheContext.m_data                 = monitorContext.m_data;
+    cacheContext.m_data.mainFB          = backdropBlurFB;
+    cacheContext.m_data.outFB           = backdropBlurFB;
+    cacheContext.m_data.renderModif     = {};
+    cacheContext.m_data.clipBox         = {};
+    cacheContext.m_data.currentWindow.reset();
+    cacheContext.m_data.surface.reset();
+    cacheContext.m_mode                 = Render::RENDER_MODE_TO_BUFFER_READ_ONLY;
+    cacheContext.m_blockSurfaceFeedback = true;
+
+    // Keep source buffers alive until the enclosing monitor frame has finished using them.
+    auto transferBufferUses = Hyprutils::Utils::CScopeGuard([&] {
+        for (auto& buffer : cacheContext.m_usedAsyncBuffers)
+            monitorContext.m_usedAsyncBuffers.emplace_back(std::move(buffer));
+        cacheContext.m_usedAsyncBuffers.clear();
+    });
 
     const CRegion fullDamage{CBox{0, 0, RENDERSIZE.x, RENDERSIZE.y}};
 
     {
-        auto bindBackdrop = g_pHyprRenderer->bindTempFB(g_pHyprRenderer->context(), backdropBlurFB);
-        g_pHyprRenderer->draw(g_pHyprRenderer->context(), CClearPassElement::SClearData{CHyprColor{0.F, 0.F, 0.F, 1.F}}, fullDamage);
-        renderGlobalWallpaper(monitor, now);
-        OverviewRender::flushPass(monitor);
+        auto bindBackdrop = g_pHyprRenderer->bindTempFB(cacheContext, backdropBlurFB);
+        g_pHyprRenderer->draw(cacheContext, CClearPassElement::SClearData{CHyprColor{0.F, 0.F, 0.F, 1.F}}, fullDamage);
+        renderGlobalWallpaper(cacheContext, monitor, now);
+        OverviewRender::flushPass(cacheContext, monitor);
     }
 
     auto         blurDamage = fullDamage;
     SP<Render::ITexture> BLURREDTEX;
     {
-        auto bindBackdrop = g_pHyprRenderer->bindTempFB(g_pHyprRenderer->context(), backdropBlurFB);
-        const auto blurredFB = g_pHyprRenderer->blurMainFramebuffer(g_pHyprRenderer->context(), 1.F, blurDamage);
+        auto bindBackdrop = g_pHyprRenderer->bindTempFB(cacheContext, backdropBlurFB);
+        const auto blurredFB = g_pHyprRenderer->blurMainFramebuffer(cacheContext, 1.F, blurDamage);
         BLURREDTEX = blurredFB ? blurredFB->getTexture() : nullptr;
     }
     if (!BLURREDTEX || !BLURREDTEX->m_size.x || !BLURREDTEX->m_size.y)
         return;
 
     {
-        auto bindBackdrop = g_pHyprRenderer->bindTempFB(g_pHyprRenderer->context(), backdropBlurFB);
-        g_pHyprRenderer->draw(g_pHyprRenderer->context(), CClearPassElement::SClearData{CHyprColor{0.F, 0.F, 0.F, 0.F}}, fullDamage);
+        auto bindBackdrop = g_pHyprRenderer->bindTempFB(cacheContext, backdropBlurFB);
+        g_pHyprRenderer->draw(cacheContext, CClearPassElement::SClearData{CHyprColor{0.F, 0.F, 0.F, 0.F}}, fullDamage);
 
-        g_pHyprRenderer->draw(g_pHyprRenderer->context(),
+        g_pHyprRenderer->draw(cacheContext,
             CTexPassElement::SRenderData{
                 .tex    = BLURREDTEX,
                 .box    = CBox{0, 0, RENDERSIZE.x, RENDERSIZE.y},
@@ -2866,7 +3025,8 @@ CBox CScrollOverview::draggedWindowBoxFor(PHLWINDOW window, size_t workspaceIdx,
     const auto WORKSPACEOFFSET = workspaceOverviewOffset(workspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
     auto       box             = getOverviewDragWindowBox(window, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout);
     box.x = pointLocal.x - box.width * std::clamp(grabRatio.x, 0.0, 1.0);
-    box.y = pointLocal.y - box.height * std::clamp(grabRatio.y, 0.0, 1.0);
+    // A grab on the title bar has a negative offset from the window's content.
+    box.y = pointLocal.y - box.height * std::min(grabRatio.y, 1.0);
     return box;
 }
 
@@ -2888,7 +3048,7 @@ CBox CScrollOverview::draggedWindowGlobalBox() const {
 
     return {
         CURSOR.x - GLOBALSIZE.x * std::clamp(dragGrabRatio.x, 0.0, 1.0),
-        CURSOR.y - GLOBALSIZE.y * std::clamp(dragGrabRatio.y, 0.0, 1.0),
+        CURSOR.y - GLOBALSIZE.y * std::min(dragGrabRatio.y, 1.0),
         GLOBALSIZE.x,
         GLOBALSIZE.y,
     };
@@ -3103,7 +3263,7 @@ void CScrollOverview::beginWindowResize() {
     }
 
     const auto WORKSPACEOFFSET = workspaceOverviewOffset(resizeWorkspaceIdx, activeWorkspaceIndex(), getWorkspaceRenderedPitch(MONITOR, scale->value(), layout));
-    resizeOriginalBox   = getOverviewWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout);
+    resizeOriginalBox   = getOverviewWindowBox(WINDOW, MONITOR, scale->value(), viewOffset->value(), WORKSPACEOFFSET, layout, true, false);
     resizeActiveWindow  = WINDOW;
     resizeLastMouseLocal = lastMousePosLocal;
 
@@ -3528,6 +3688,9 @@ void CScrollOverview::endWindowDrag() {
     if (!WINDOW || !TARGET)
         return;
 
+    const auto DECORATIONEXTENTS = g_pDecorationPositioner && WINDOW->m_ruleApplicator->decorate().valueOrDefault() ?
+        g_pDecorationPositioner->getWindowDecorationExtents(WINDOW, true) : SBoxExtents{};
+
     const auto          targetOverview = scrollOverviewAt(g_pInputManager->getMouseCoordsInternal());
     auto*               dropOverview   = targetOverview ? dynamic_cast<CScrollOverview*>(targetOverview.get()) : nullptr;
 
@@ -3663,9 +3826,8 @@ void CScrollOverview::endWindowDrag() {
         if (TARGET) {
             const auto GLOBALSIZE = DRAGBOX.size() * (1.F / (std::max(dropOverview->scale->value(), 0.01F) * std::max(DROPMONITOR ? DROPMONITOR->m_scale : 1.F, 0.01F)));
             auto       GLOBALBOX  = dropWorkspaceFullyVisible ? CBox{dropOverview->overviewPointToGlobal(dropWorkspaceIdx, DRAGBOX.pos()), GLOBALSIZE} :
-                                                                centerBoxInWorkspace(CBox{Vector2D{}, GLOBALSIZE}, DROPWORKSPACE, DROPMONITOR);
-            if (dropWorkspaceFullyVisible)
-                GLOBALBOX = clampBoxToWorkspace(GLOBALBOX, DROPWORKSPACE, DROPMONITOR, WINDOW->presentation().borderSize());
+                                                                centerBoxInWorkspace(CBox{Vector2D{}, GLOBALSIZE}, DROPWORKSPACE, DROPMONITOR, DECORATIONEXTENTS);
+            GLOBALBOX = clampBoxToWorkspace(GLOBALBOX, DROPWORKSPACE, DROPMONITOR, WINDOW->presentation().borderSize(), DECORATIONEXTENTS);
 
             TARGET->setPositionGlobal(GLOBALBOX);
             TARGET->warpPositionSize();
@@ -3682,7 +3844,7 @@ void CScrollOverview::endWindowDrag() {
         auto       GLOBALBOX  = CBox{GLOBALPOS, GLOBALSIZE};
         const auto WORKSPACE  = workspaceIdx < images.size() && images[workspaceIdx] ? images[workspaceIdx]->pWorkspace : WINDOW->m_workspace;
 
-        GLOBALBOX = clampBoxToWorkspace(GLOBALBOX, WORKSPACE, MONITOR, WINDOW->presentation().borderSize());
+        GLOBALBOX = clampBoxToWorkspace(GLOBALBOX, WORKSPACE, MONITOR, WINDOW->presentation().borderSize(), DECORATIONEXTENTS);
 
         TARGET->damageEntire();
         TARGET->setPositionGlobal(GLOBALBOX);
@@ -4026,6 +4188,33 @@ bool CScrollOverview::moveSelection(const std::string& direction) {
 
     if (!shouldMoveWorkspace && (!closeOnWindow || closeOnWindow->m_workspace != WORKSPACEIMAGE->pWorkspace || !shouldShowOverviewWindow(closeOnWindow.lock()) || closeOnWindow->isFloating())) {
         syncSelectionToViewport();
+
+        // syncSelectionToViewport() can keep (or pick) a floating window, e.g. a small launcher near the
+        // workspace center. Floating windows are never navigation candidates, so starting from one turned
+        // every left/right press into a workspace move. Start from the nearest tiled window instead.
+        if (closeOnWindow && closeOnWindow->isFloating() && closeOnWindow->m_workspace == WORKSPACEIMAGE->pWorkspace) {
+            const auto ORIGIN = closeOnWindow->middle();
+            PHLWINDOW  nearestTiled;
+            double     nearestDistance = std::numeric_limits<double>::max();
+
+            for (const auto& windowRef : WORKSPACEIMAGE->windows) {
+                const auto WINDOW = getOverviewWindowToShow(windowRef.lock());
+                if (!shouldShowOverviewWindow(WINDOW) || WINDOW->isFloating())
+                    continue;
+                if (WINDOW->m_workspace != WORKSPACEIMAGE->pWorkspace || WINDOW->m_monitor != pMonitor)
+                    continue;
+
+                const double DISTANCE = WINDOW->middle().distanceSq(ORIGIN);
+                if (DISTANCE < nearestDistance) {
+                    nearestTiled    = WINDOW;
+                    nearestDistance = DISTANCE;
+                }
+            }
+
+            if (nearestTiled)
+                closeOnWindow = nearestTiled;
+        }
+
         if (!closeOnWindow || closeOnWindow->m_workspace != WORKSPACEIMAGE->pWorkspace || !shouldShowOverviewWindow(closeOnWindow.lock()) || closeOnWindow->isFloating())
             shouldMoveWorkspace = true;
     }
@@ -4522,8 +4711,8 @@ void CScrollOverview::renderWorkspaceBackground(PHLMONITOR monitor, size_t works
     if (wallpaperMode != 0 && WORKSPACEALPHA > 0.001F)
         renderWallpaperLayers(monitor, WORKSPACEBOX, renderScale, now, WORKSPACEALPHA);
 
-    if (WORKSPACEALPHA >= 0.999F)
-        renderOverviewLayerLevel(monitor, ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM, WORKSPACEBOX, renderScale, now);
+    if (WORKSPACEALPHA > 0.001F)
+        renderWidgetLayers(monitor, WORKSPACEBOX, renderScale, now, WORKSPACEALPHA);
 }
 
 void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceIdx, size_t activeIdx, float workspacePitch, float renderScale, int wallpaperMode, const Time::steady_tp& now) {
@@ -4555,8 +4744,12 @@ void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceId
     // early return below (Super+D and similar) — without it, a workspace with
     // a fullscreen window would skip the in-card bar render entirely.
     auto renderShellLayersOnExit = Hyprutils::Utils::CScopeGuard([monitor, WORKSPACEBOX, renderScale, now] {
-        renderOverviewLayerLevel(monitor, ZWLR_LAYER_SHELL_V1_LAYER_TOP, WORKSPACEBOX, renderScale, now);
-        renderOverviewLayerLevel(monitor, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, WORKSPACEBOX, renderScale, now);
+        std::vector<PHLLS> layers;
+        for (const auto level : {ZWLR_LAYER_SHELL_V1_LAYER_TOP, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY})
+            for (const auto& layer : monitor->m_layerSurfaceLayers[level])
+                if (const auto surface = layer.lock(); Desktop::View::validMapped(surface))
+                    layers.push_back(surface);
+        renderOverviewSurfaces(monitor, layers, WORKSPACEBOX, renderScale, now);
     });
 
     const auto renderOverviewWindow = [&](const PHLWINDOW& window) {
@@ -4565,7 +4758,7 @@ void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceId
         if (dragActiveWindow && window == getOverviewWindowToShow(dragActiveWindow.lock()))
             return;
 
-        const auto windowBox = getOverviewWindowBox(window, monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET, layout);
+        const auto windowBox = getOverviewWindowBox(window, monitor, renderScale, viewOffset->value(), WORKSPACEOFFSET, layout, true, false);
         if (!overviewBoxIntersectsMonitor(windowBox, monitor))
             return;
 
@@ -4609,7 +4802,7 @@ void CScrollOverview::renderWorkspaceLive(PHLMONITOR monitor, size_t workspaceId
 
     if (!scrollingLayout && hasFullscreenPath) {
         renderOverviewWindow(fullscreenWindow);
-        OverviewRender::flushPass(monitor);
+        OverviewRender::flushPass(g_pHyprRenderer->context(), monitor);
         for (const auto& windowRef : workspaceImage->windows) {
             const auto window = getOverviewWindowToShow(windowRef.lock());
             if (!shouldShowOverviewWindow(window) || !window->isFloating() || window == fullscreenWindow)
@@ -5266,7 +5459,7 @@ bool CScrollOverview::shouldHandleSurfaceDamage(SP<CWLSurfaceResource> surface) 
             return true;
 
         markBlurDirty();
-        if (layerOwner->m_layer == ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND)
+        if (isWallpaperSurface(layerOwner, MONITOR))
             markBackdropBlurDirty();
         return true;
     }
@@ -5680,24 +5873,19 @@ void CScrollOverview::render() {
         lastOverviewBlurViewOffset = VIEWOFFSET;
     }
 
-    const auto WALLPAPERMODE = ScrollOverview::Config::getWallpaperMode(pMonitor.lock());
-    const bool HASCUSTOMWP   = !ScrollOverview::Config::getWallpaperPath(pMonitor.lock()).empty();
-
-    if (HASCUSTOMWP && WALLPAPERMODE != 1) {
-        // Custom image-file wallpaper bakes its own CPU pre-blur inside
-        // renderGlobalWallpaper — Hyprland's GL blur (blurFramebuffer) produces
-        // noise against this texture, so skip the GL blur cache entirely.
-        renderGlobalWallpaper(MONITOR, NOW);
-    } else if (ScrollOverview::Config::getBlur(pMonitor.lock()) && WALLPAPERMODE != 1) {
-        updateBackdropBlurCache(MONITOR, WALLPAPERMODE, NOW);
-        if (backdropBlurFB && backdropBlurFB->isAllocated() && backdropBlurFB->getTexture())
+    const auto WALLPAPERMODE = ScrollOverview::Config::getWallpaperMode(MONITOR);
+    auto& ctx = g_pHyprRenderer->context();
+    if (WALLPAPERMODE == 1) {
+        g_pHyprRenderer->draw(ctx, CClearPassElement::SClearData{CHyprColor{0.F, 0.F, 0.F, 1.F}}, {});
+    } else if (!renderCustomWallpaper(ctx, MONITOR)) {
+        const bool BLUR = ScrollOverview::Config::getBlur(MONITOR);
+        if (BLUR)
+            updateBackdropBlurCache(MONITOR, WALLPAPERMODE, NOW);
+        if (BLUR && !backdropBlurDirty && backdropBlurFB && backdropBlurFB->isAllocated() && backdropBlurFB->getTexture())
             renderBackdropBlurCache(MONITOR);
         else
-            renderGlobalWallpaper(MONITOR, NOW);
-    } else if (WALLPAPERMODE == 0 || WALLPAPERMODE == 2) {
-        renderGlobalWallpaper(MONITOR, NOW);
-    } else
-        g_pHyprRenderer->draw(g_pHyprRenderer->context(), CClearPassElement::SClearData{CHyprColor{0.F, 0.F, 0.F, 1.F}}, {});
+            renderGlobalWallpaper(ctx, MONITOR, NOW);
+    }
 
     Event::bus()->m_events.render.stage.emit(Event::SRenderStageEvent{.stage = RENDER_POST_WALLPAPER, .monitor = MONITOR, .context = g_pHyprRenderer->context()});
 
@@ -5716,7 +5904,7 @@ void CScrollOverview::render() {
             if (WALLPAPERMODE != 0)
                 renderWallpaperLayers(MONITOR, GHOSTBOX, SCALE, NOW, GHOSTALPHA);
 
-            renderOverviewLayerLevel(MONITOR, ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM, GHOSTBOX, SCALE, NOW);
+            renderWidgetLayers(MONITOR, GHOSTBOX, SCALE, NOW, GHOSTALPHA);
         }
     }
 
@@ -5724,7 +5912,7 @@ void CScrollOverview::render() {
     if (NEEDS_PRECOMPUTED_BLUR && overviewBlurDirty)
         Render::IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(makeUnique<CPreBlurElement>());
 
-    OverviewRender::flushPass(MONITOR);
+    OverviewRender::flushPass(g_pHyprRenderer->context(), MONITOR);
 
     if (NEEDS_PRECOMPUTED_BLUR)
         overviewBlurDirty = false;
@@ -5741,14 +5929,10 @@ void CScrollOverview::render() {
     const auto sidebarLayer = [](const PHLLS& layer) {
         return layer && (layer->m_namespace == "quickshell:sidebarLeft" || layer->m_namespace == "quickshell:sidebarRight");
     };
-    for (const auto LAYER : {ZWLR_LAYER_SHELL_V1_LAYER_TOP, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY}) {
-        for (auto const& ls : MONITOR->m_layerSurfaceLayers[LAYER]) {
-            const auto layer = ls.lock();
-            if (!Desktop::View::validMapped(layer) || sidebarLayer(layer))
-                continue;
-
-            g_pHyprRenderer->renderLayer(g_pHyprRenderer->context(), ls.lock(), MONITOR, NOW);
-        }
+    for (const auto& ls : MONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_TOP]) {
+        const auto layer = ls.lock();
+        if (Desktop::View::validMapped(layer) && !sidebarLayer(layer))
+            g_pHyprRenderer->renderLayer(g_pHyprRenderer->context(), layer, MONITOR, NOW);
     }
 
     // Overlay layer renders above Top — needed so Overlay-layer surfaces
@@ -5855,6 +6039,9 @@ bool CScrollOverview::dispatchSubmapMouseClick(uint32_t button) {
     if (KEYBIND == BINDS.end())
         return false;
 
+    // Keep the callback alive if it removes its own binding.
+    const auto BIND = *KEYBIND;
+
     auto&      actionState          = *Config::Actions::state();
     const int PREVIOUSPASSPRESSED   = actionState.m_passPressed;
     const int PREVIOUSDEPTH         = actionState.m_bindInvocationDepth;
@@ -5871,7 +6058,7 @@ bool CScrollOverview::dispatchSubmapMouseClick(uint32_t button) {
         actionState.m_lastMouseCode       = PREVIOUSMOUSECODE;
     });
 
-    const auto RESULT = (*KEYBIND)->invoke();
+    const auto RESULT = BIND->invoke();
     return RESULT.success;
 }
 

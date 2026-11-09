@@ -423,6 +423,7 @@ static void defineConfigValues() {
     // Optional image-file backdrop -- needed for Quickshell/Qt-painted wallpaper
     // setups (dots-hyprland) whose layer surface isn't stable to sample.
     addValue(makeShared<CStringValue>("plugin:scrolloverview:wallpaper_path", "path to a static image used as the overview backdrop", Hyprlang::STRING{""}));
+    addValue(makeShared<CStringValue>("plugin:scrolloverview:wallpaper_layer", "wallpaper layer detection: auto, background, or bottom", Hyprlang::STRING{"auto"}));
     addValue(makeShared<CBoolValue>("plugin:scrolloverview:blur", "blur the overview wallpaper", false));
     addValue(makeShared<CBoolValue>("plugin:scrolloverview:shadow:enabled", "draw a shadow around each workspace card", false));
     addValue(makeShared<CIntValue>("plugin:scrolloverview:shadow:range", "workspace card shadow range", -1));
@@ -530,6 +531,16 @@ std::string getWallpaperPath(PHLMONITOR monitor) {
     return getValue<std::string>("plugin:scrolloverview:wallpaper_path", monitor);
 }
 
+EWallpaperLayer getWallpaperLayer(PHLMONITOR monitor) {
+    const auto LAYER = getValue<std::string>("plugin:scrolloverview:wallpaper_layer", monitor);
+    if (LAYER == "background")
+        return EWallpaperLayer::BACKGROUND;
+    if (LAYER == "bottom")
+        return EWallpaperLayer::BOTTOM;
+
+    return EWallpaperLayer::AUTO;
+}
+
 bool getBlur(PHLMONITOR monitor) {
     return getValue<bool>("plugin:scrolloverview:blur", monitor);
 }
@@ -561,9 +572,7 @@ int getShadowRenderPower(PHLMONITOR monitor) {
 std::optional<::Config::CGradientValueData> getShadowColor(PHLMONITOR monitor) {
     constexpr auto NAME = "plugin:scrolloverview:shadow:color";
 
-    const auto reply = ::Config::mgr()->getConfigValue(NAME);
-    const bool setByUser = reply.setByUser && *reply.setByUser;
-    if (!monitorValueData(NAME, monitor) && !setByUser)
+    if (!monitorValueData(NAME, monitor) && !valueRef<::Config::IComplexConfigValue>(NAME).setByUser())
         return std::nullopt;
 
     return getValue<::Config::CGradientValueData>(NAME, monitor);
