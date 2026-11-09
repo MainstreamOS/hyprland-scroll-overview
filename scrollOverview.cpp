@@ -1682,11 +1682,12 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
     };
 
     auto onKeyboardKey = [this](IKeyboard::SKeyEvent event, Event::SCallbackInfo& info) {
-        if (closing || event.state != WL_KEYBOARD_KEY_STATE_PRESSED)
+        if (info.cancelled || closing || event.state != WL_KEYBOARD_KEY_STATE_PRESSED)
             return;
 
         const auto KEYSYM = getOverviewKeysym(event);
-        if (KEYSYM == XKB_KEY_Escape && g_pointerGrabOverview && g_pointerGrabOverview->dragActiveWindow)
+        if (KEYSYM == XKB_KEY_Escape && g_pointerGrabOverview &&
+            (g_pointerGrabOverview->dragActiveWindow || g_pointerGrabOverview->dragCancelledAwaitingRelease))
             return;
         if (activeScrollOverview().get() != this || isTopLayerFocused(pMonitor.lock()))
             return;
@@ -1743,7 +1744,7 @@ CScrollOverview::CScrollOverview(PHLWORKSPACE startedOn_, bool swipe_, PHLMONITO
         keyboardKeyHook = Event::bus()->m_events.input.keyboard.key.listen(onKeyboardKey);
 
     dragKeyboardKeyHook = Event::bus()->m_events.input.keyboard.key.listen([this](IKeyboard::SKeyEvent event, Event::SCallbackInfo& info) {
-        if (closing || !dragActiveWindow || event.state != WL_KEYBOARD_KEY_STATE_PRESSED || getOverviewKeysym(event) != XKB_KEY_Escape)
+        if (info.cancelled || closing || !dragActiveWindow || event.state != WL_KEYBOARD_KEY_STATE_PRESSED || getOverviewKeysym(event) != XKB_KEY_Escape)
             return;
 
         info.cancelled = true;
