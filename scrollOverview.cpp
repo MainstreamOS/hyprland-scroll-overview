@@ -2359,7 +2359,7 @@ void CScrollOverview::rebuildWorkspaceImages() {
         if (!valid(WORKSPACE) || WORKSPACE->m_monitor != pMonitor || WORKSPACE->type() == Workspace::eWorkspaceType::SPECIAL)
             continue;
 
-        if (WORKSPACE == REMOVEDWORKSPACE)
+        if (WORKSPACE == REMOVEDWORKSPACE && WORKSPACE != startedOn)
             continue;
 
         images.emplace_back(makeShared<SWorkspaceImage>(WORKSPACE));
@@ -2375,6 +2375,33 @@ void CScrollOverview::rebuildWorkspaceImages() {
         if (AID.has_value() != BID.has_value())
             return !AID.has_value();
         return a->pWorkspace->addressableName() < b->pWorkspace->addressableName();
+    });
+
+    PHLWORKSPACE firstEmptyWorkspace;
+    PHLWORKSPACE nextEmptyWorkspace;
+    for (const auto& image : images) {
+        const auto& workspace = image->pWorkspace;
+        if (workspace->getWindowCount() > 0) {
+            nextEmptyWorkspace.reset();
+            continue;
+        }
+
+        // An empty active workspace is still the anchor for the overview.
+        if (workspace == startedOn) {
+            nextEmptyWorkspace = workspace;
+            break;
+        }
+
+        if (!firstEmptyWorkspace)
+            firstEmptyWorkspace = workspace;
+        if (!nextEmptyWorkspace)
+            nextEmptyWorkspace = workspace;
+    }
+
+    // Prefer the first empty card after the occupied workspaces.
+    const auto EMPTYWORKSPACE = nextEmptyWorkspace ? nextEmptyWorkspace : firstEmptyWorkspace;
+    std::erase_if(images, [&EMPTYWORKSPACE](const auto& image) {
+        return image->pWorkspace != EMPTYWORKSPACE && image->pWorkspace->getWindowCount() == 0;
     });
 
     if (images.empty()) {
@@ -5791,13 +5818,13 @@ void CScrollOverview::onWorkspaceChange() {
     redrawAll();
     viewportCurrentWorkspace = activeWorkspaceIndex();
 
-    const bool REMOVEDPREVIOUSWORKSPACE =
-        REMOVEDWORKSPACE &&
-        std::find_if(images.begin(), images.end(), [REMOVEDWORKSPACE](const auto& image) { return image && image->pWorkspace == REMOVEDWORKSPACE; }) == images.end();
+    const auto PREVIOUSKEY = previousStartedOn ? Workspace::selector(*previousStartedOn) : std::string{};
+    const bool REMOVEDPREVIOUSWORKSPACE = previousWorkspaceOffsets.contains(PREVIOUSKEY) &&
+        std::ranges::none_of(images, [&previousStartedOn](const auto& image) { return image->pWorkspace == previousStartedOn; });
 
     if (INSERTEDWORKSPACE || REMOVEDPREVIOUSWORKSPACE) {
         workspaceInsertTransition.active                 = true;
-        workspaceInsertTransition.transitionWorkspaceKey = INSERTEDWORKSPACE ? Workspace::selector(*NEWWORKSPACE) : Workspace::selector(*REMOVEDWORKSPACE);
+        workspaceInsertTransition.transitionWorkspaceKey = INSERTEDWORKSPACE ? Workspace::selector(*NEWWORKSPACE) : PREVIOUSKEY;
         workspaceInsertTransition.transitionFadeIn       = INSERTEDWORKSPACE;
         workspaceInsertFadeProgress->setConfig(INSERTEDWORKSPACE ? workspaceInsertFadeConfig : workspaceRemoveFadeConfig);
         workspaceInsertTransition.oldRelativeOffsets.clear();
@@ -5807,7 +5834,7 @@ void CScrollOverview::onWorkspaceChange() {
         for (size_t i = 0; i < previousWorkspaceKeys.size(); ++i) {
             const auto OFFSET = previousWorkspaceOffsets.contains(previousWorkspaceKeys[i]) ? previousWorkspaceOffsets.at(previousWorkspaceKeys[i]) : 0.F;
             workspaceInsertTransition.oldRelativeOffsets.emplace(previousWorkspaceKeys[i], OFFSET);
-            if (REMOVEDPREVIOUSWORKSPACE && previousWorkspaceKeys[i] == Workspace::selector(*REMOVEDWORKSPACE))
+            if (REMOVEDPREVIOUSWORKSPACE && previousWorkspaceKeys[i] == PREVIOUSKEY)
                 workspaceInsertTransition.transitionOldRelativeOffset = OFFSET;
         }
 
